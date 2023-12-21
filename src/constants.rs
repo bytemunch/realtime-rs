@@ -11,7 +11,7 @@ pub const DEFAULT_TIMEOUT: usize = 10000; // TODO duration type?
 
 pub const WS_CLOSE_NORMAL: usize = 1000;
 
-// TODO impl Display/serde as lowercase variant names
+// TODO impl Display as lowercase variant names
 pub enum SocketState {
     Connecting,
     Open,
@@ -27,7 +27,7 @@ pub enum ConnectionState {
     Closed,
 }
 
-// TODO impl Display/serde
+// TODO impl Display
 /// Each should be evaluated as lowercase variant name
 pub enum ChannelState {
     Closed,
@@ -38,8 +38,8 @@ pub enum ChannelState {
 }
 
 // TODO impl Display
-#[derive(Serialize, Deserialize)]
-pub enum ChannelEvent {
+#[derive(Serialize, Deserialize, Debug)]
+pub enum MessageEvent {
     #[serde(rename = "phx_close")]
     Close,
     #[serde(rename = "phx_error")]
@@ -52,6 +52,14 @@ pub enum ChannelEvent {
     Leave,
     #[serde(rename = "access_token")]
     AccessToken,
+    #[serde(rename = "presence_state")]
+    PresenceState,
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+    #[serde(rename = "postgres_changes")]
+    PostgresChanges,
 }
 
 // TODO impl Display = "websocket"
