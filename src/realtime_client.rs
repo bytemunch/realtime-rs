@@ -203,8 +203,7 @@ impl Into<Message> for RealtimeMessage {
 pub struct RealtimeClient {
     socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
     channels: Vec<RealtimeChannel>,
-    message_queue: Vec<RealtimeMessage>,
-    message_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
 }
 
 impl RealtimeClient {
@@ -248,7 +247,7 @@ impl RealtimeClient {
 
         let socket = Arc::new(Mutex::new(socket));
 
-        let message_channel = mpsc::channel::<RealtimeMessage>();
+        let inbound_channel = mpsc::channel::<RealtimeMessage>();
 
         // TODO check response.status is 101
 
@@ -279,24 +278,15 @@ impl RealtimeClient {
         let join_message = serde_json::to_string(&init).expect("Json bad");
         println!("\nJoinMessage:\n{}\n", join_message);
 
-        let _ = message_channel.0.send(init.into());
-
-        // this needs to be in another thread.
-        // loop {
-        //     let msg = self.socket.read().expect("Error reading message");
-        //
-        //     let msg = msg.to_text().unwrap();
-        //
-        //     println!("Received: {}", msg);
-        //     let v: RealtimeMessage = serde_json::from_str(msg).expect("Json like complex demon");
-        //     println!("Value: {:?}", v);
-        // }
+        // TODO un unwrap
+        let _ = socket.lock().unwrap().send(init.into());
 
         let loop_socket = Arc::clone(&socket);
 
-        let tx = message_channel.0.clone();
+        let inbound_tx = inbound_channel.0.clone();
 
         thread::spawn(move || loop {
+            // Recieve from server
             let msg = loop_socket
                 .lock()
                 .unwrap()
@@ -305,24 +295,15 @@ impl RealtimeClient {
 
             let msg = msg.to_text().unwrap();
 
-            println!("Received: {}", msg);
-            let v: RealtimeMessage = serde_json::from_str(msg).expect("Json like complex demon");
-            println!("Value: {:?}", v);
-
-            let _ = tx.send(v);
+            let msg: RealtimeMessage = serde_json::from_str(msg).expect("Json like complex demon");
+            // TODO error handling; match on msg values
+            let _ = inbound_tx.send(msg);
         });
-
-        // TODO recieve loop for message_channel
-        //
-        for recieved in &message_channel.1 {
-            println!("Got message in connect()! {:?}", recieved);
-        }
 
         RealtimeClient {
             socket,
             channels: Vec::new(),
-            message_queue: Vec::new(),
-            message_channel,
+            inbound_channel,
         }
 
         // socket.close(None);
@@ -352,5 +333,9 @@ impl RealtimeClient {
         };
     }
 
-    fn on_message() {}
+    pub fn on_message(&mut self) {
+        for message_recieved in &self.inbound_channel.1 {
+            println!("\non_message: {:?}", message_recieved);
+        }
+    }
 }
