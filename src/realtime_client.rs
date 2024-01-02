@@ -53,7 +53,7 @@ pub enum Payload {
     Response(JoinResponsePayload),
     System(SystemPayload),
     AccessToken(AccessTokenPayload),
-    PostgresChange(PostgresChangePayload),
+    PostgresChange(PostgresChangePayload), // TODO rename because clashes
     Empty {}, // TODO perf: implement custom deser cos this bad. typechecking: this matches
               // everything that can't deser elsewhere. not good.
 }
@@ -111,31 +111,32 @@ pub struct SystemPayload {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JoinPayload {
-    config: JoinConfig,
+    pub config: JoinConfig,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct JoinConfig {
-    broadcast: JoinConfigBroadcast,
-    presence: JoinConfigPresence,
-    postgres_changes: Vec<PostgresChange>,
+pub struct JoinConfig {
+    pub broadcast: JoinConfigBroadcast,
+    pub presence: JoinConfigPresence,
+    pub postgres_changes: Vec<PostgresChange>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct JoinConfigBroadcast {
+pub struct JoinConfigBroadcast {
     #[serde(rename = "self")]
-    broadcast_self: bool,
-    ack: bool,
+    pub(crate) broadcast_self: bool,
+    pub(crate) ack: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct JoinConfigPresence {
-    key: String,
+pub struct JoinConfigPresence {
+    pub key: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Default)]
 pub enum PostgresEvent {
     #[serde(rename = "*")]
+    #[default]
     All,
     #[serde(rename = "INSERT")]
     Insert,
@@ -145,15 +146,15 @@ pub enum PostgresEvent {
     Delete,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct PostgresChange {
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct PostgresChange {
     #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<isize>,
-    event: PostgresEvent,
-    schema: String,
-    table: String,
+    pub id: Option<isize>,
+    pub event: PostgresEvent,
+    pub schema: String,
+    pub table: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    filter: Option<String>, // TODO structured filters
+    pub filter: Option<String>, // TODO structured filters
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -239,7 +240,7 @@ impl Default for RealtimeClientOptions {
 
 #[derive(Debug)]
 pub struct RealtimeClient {
-    socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
+    pub socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
     channels: HashMap<String, RealtimeChannel>,
     inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
     /// Options to be used in internal fns
@@ -284,42 +285,11 @@ impl RealtimeClient {
         let conn = connect(req);
 
         let (socket, _res) = conn.expect("Uhoh connection broke");
+        // TODO check response.status is 101
 
         let socket = Arc::new(Mutex::new(socket));
 
         let inbound_channel = mpsc::channel::<RealtimeMessage>();
-
-        // TODO check response.status is 101
-
-        let init = RealtimeMessage {
-            event: MessageEvent::Join,
-            topic: format!("realtime:{}", "test"),
-            payload: Payload::Join(JoinPayload {
-                config: JoinConfig {
-                    presence: JoinConfigPresence {
-                        key: "test_key".to_owned(),
-                    },
-                    broadcast: JoinConfigBroadcast {
-                        broadcast_self: true,
-                        ack: false,
-                    },
-                    postgres_changes: vec![PostgresChange {
-                        id: None,
-                        event: PostgresEvent::All,
-                        schema: "public".to_owned(),
-                        table: "todos".to_owned(),
-                        filter: None,
-                    }],
-                },
-            }),
-            message_ref: Some("init".to_owned()),
-        };
-
-        let join_message = serde_json::to_string(&init).expect("Json bad");
-        println!("\nJoinMessage:\n{}\n", join_message);
-
-        // TODO un unwrap
-        let _ = socket.lock().unwrap().send(init.into());
 
         let loop_socket = Arc::clone(&socket);
 
@@ -374,20 +344,18 @@ impl RealtimeClient {
         };
     }
 
-    pub fn channel(&mut self, topic: String) -> &mut RealtimeChannel {
+    pub fn channel(&mut self, topic: String, changes: Vec<PostgresChange>) -> &mut RealtimeChannel {
         let topic = format!("realtime:{}", topic);
 
-        let new_channel = RealtimeChannel::new(topic.clone());
+        let new_channel = RealtimeChannel::new(self, topic.clone(), changes);
 
         self.channels.insert(topic.clone(), new_channel);
 
         self.channels.get_mut(&topic).unwrap()
     }
 
-    pub fn on_message(&mut self) {
+    pub fn listen(&mut self) {
         for message in &self.inbound_channel.1 {
-            println!("\non_message: {:?}", message);
-
             let Some(c) = self.channels.get_mut(&message.topic) else {
                 continue;
             };

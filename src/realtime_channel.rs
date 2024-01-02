@@ -1,5 +1,9 @@
-use crate::realtime_client::Payload::PostgresChange;
-use crate::realtime_client::{PostgresEvent, RealtimeMessage};
+use crate::constants::MessageEvent;
+use crate::realtime_client::Payload::{self};
+use crate::realtime_client::{
+    JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, PostgresChange,
+    PostgresEvent, RealtimeClient, RealtimeMessage,
+};
 use std::fmt::Debug;
 
 pub struct RealtimeChannel {
@@ -10,7 +14,31 @@ pub struct RealtimeChannel {
 }
 
 impl RealtimeChannel {
-    pub fn new(topic: String) -> RealtimeChannel {
+    pub fn new(
+        client: &mut RealtimeClient,
+        topic: String,
+        postgres_changes: Vec<PostgresChange>,
+    ) -> RealtimeChannel {
+        let join_message = RealtimeMessage {
+            event: MessageEvent::Join,
+            topic: topic.clone(),
+            payload: Payload::Join(JoinPayload {
+                config: JoinConfig {
+                    presence: JoinConfigPresence {
+                        key: "test_key".to_owned(),
+                    },
+                    broadcast: JoinConfigBroadcast {
+                        broadcast_self: true,
+                        ack: false,
+                    },
+                    postgres_changes,
+                },
+            }),
+            message_ref: Some("init".to_owned()), // TODO idk what this does
+        };
+
+        // TODO un unwrap
+        let _ = client.socket.lock().unwrap().send(join_message.into());
         RealtimeChannel {
             topic,
             callbacks: vec![],
@@ -22,7 +50,7 @@ impl RealtimeChannel {
     }
 
     pub fn recieve(&mut self, message: RealtimeMessage) {
-        let PostgresChange(ref payload) = message.payload else {
+        let Payload::PostgresChange(ref payload) = message.payload else {
             return;
         };
 
