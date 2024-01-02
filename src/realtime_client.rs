@@ -9,13 +9,17 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tungstenite::{
-    client::IntoClientRequest, connect, http::HeaderValue, stream::MaybeTlsStream, Message,
-    WebSocket,
+    client::IntoClientRequest,
+    connect,
+    http::{HeaderMap, HeaderValue},
+    stream::MaybeTlsStream,
+    Message, WebSocket,
 };
 
 use crate::{constants::MessageEvent, realtime_channel::RealtimeChannel};
@@ -44,7 +48,7 @@ use crate::{constants::MessageEvent, realtime_channel::RealtimeChannel};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-pub(crate) enum Payload {
+pub enum Payload {
     Join(JoinPayload),
     Response(JoinResponsePayload),
     System(SystemPayload),
@@ -55,20 +59,20 @@ pub(crate) enum Payload {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct PostgresChangePayload {
-    data: PostgresChangeData,
+pub struct PostgresChangePayload {
+    pub data: PostgresChangeData,
     ids: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct PostgresChangeData {
+pub struct PostgresChangeData {
     columns: Vec<PostgresColumn>,
     commit_timestamp: String,
     errors: Option<String>,
     old_record: PostgresOldDataRef,
     record: HashMap<String, Value>,
     #[serde(rename = "type")]
-    change_type: PostgresEvent,
+    pub change_type: PostgresEvent,
     schema: String,
     table: String,
 }
@@ -93,12 +97,12 @@ struct PostgresOldDataRef {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct AccessTokenPayload {
+pub struct AccessTokenPayload {
     access_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct SystemPayload {
+pub struct SystemPayload {
     channel: String,
     extension: String,
     message: String,
@@ -106,7 +110,7 @@ pub(crate) struct SystemPayload {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct JoinPayload {
+pub struct JoinPayload {
     config: JoinConfig,
 }
 
@@ -129,8 +133,8 @@ struct JoinConfigPresence {
     key: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-enum PostgresEvent {
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+pub enum PostgresEvent {
     #[serde(rename = "*")]
     All,
     #[serde(rename = "INSERT")]
@@ -153,7 +157,7 @@ struct PostgresChange {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct JoinResponsePayload {
+pub struct JoinResponsePayload {
     response: JoinResponse,
     status: PayloadStatus,
 }
@@ -172,13 +176,13 @@ pub enum PayloadStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct RealtimeMessage {
-    event: MessageEvent,
-    topic: String,
+pub struct RealtimeMessage {
+    pub event: MessageEvent,
+    pub topic: String,
     // TODO payload structure
-    payload: Payload,
+    pub payload: Payload,
     #[serde(rename = "ref")]
-    message_ref: Option<String>,
+    pub message_ref: Option<String>,
 }
 
 impl RealtimeMessage {
@@ -200,16 +204,52 @@ impl Into<Message> for RealtimeMessage {
 }
 
 #[derive(Debug)]
+pub struct RealtimeClientOptions {
+    access_token: Option<String>,
+    endpoint: String,
+    headers: Option<HeaderMap>,
+    params: Option<HashMap<String, String>>,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+    client_ref: isize,
+    encode: Option<String>,               // placeholder
+    decode: Option<String>,               // placeholder
+    reconnect_interval: Option<Duration>, // placeholder TODO backoff function
+}
+
+impl Default for RealtimeClientOptions {
+    fn default() -> Self {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
+
+        Self {
+            access_token: Some(env::var("ANON_KEY").unwrap()),
+            endpoint: "ws://127.0.0.1:3012".to_string(),
+            headers: Some(headers),
+            params: None,
+            timeout: Duration::from_millis(10000),
+            heartbeat_interval: Duration::from_millis(30000),
+            client_ref: 0,
+            encode: None,
+            decode: None,
+            reconnect_interval: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct RealtimeClient {
     socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
-    channels: Vec<RealtimeChannel>,
+    channels: HashMap<String, RealtimeChannel>,
     inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    /// Options to be used in internal fns
+    options: RealtimeClientOptions,
 }
 
 impl RealtimeClient {
     fn start() {}
 
-    // alias to self::new(...);
+    // Test fn
     pub fn connect(local: bool, port: isize) -> RealtimeClient {
         let supabase_id = env::var("SUPABASE_ID").unwrap();
         let anon_key = env::var("ANON_KEY").unwrap();
@@ -302,8 +342,9 @@ impl RealtimeClient {
 
         RealtimeClient {
             socket,
-            channels: Vec::new(),
+            channels: HashMap::new(),
             inbound_channel,
+            options: RealtimeClientOptions::default(),
         }
 
         // socket.close(None);
@@ -333,9 +374,25 @@ impl RealtimeClient {
         };
     }
 
+    pub fn channel(&mut self, topic: String) -> &mut RealtimeChannel {
+        let topic = format!("realtime:{}", topic);
+
+        let new_channel = RealtimeChannel::new(topic.clone());
+
+        self.channels.insert(topic.clone(), new_channel);
+
+        self.channels.get_mut(&topic).unwrap()
+    }
+
     pub fn on_message(&mut self) {
-        for message_recieved in &self.inbound_channel.1 {
-            println!("\non_message: {:?}", message_recieved);
+        for message in &self.inbound_channel.1 {
+            println!("\non_message: {:?}", message);
+
+            let Some(c) = self.channels.get_mut(&message.topic) else {
+                continue;
+            };
+
+            c.recieve(message);
         }
     }
 }

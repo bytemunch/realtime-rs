@@ -3,10 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_HEADERS: &str = "X-Client-Info: realtime-rs/0.1.0"; // TODO version
-
-pub const VSN: &str = "1.0.0";
-
 pub const DEFAULT_TIMEOUT: usize = 10000; // TODO duration type?
 
 pub const WS_CLOSE_NORMAL: usize = 1000;

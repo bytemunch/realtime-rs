@@ -1,12 +1,16 @@
-# Supabase Realtime-rs
+# Supabase realtime-rs
 
-Very early development, look away while I wrangle JSON into rust structs.
+progress is happening, channel subscription and callbacks are in working very rough prototype stages
 
-The plan is to clone the realtime-js client library, keeping the function calls as close to parity as the language allows.
+---
 
-I just googled what an ORM is the other day so I'm sure I got this lol
+async is hard, how do i just spin the loop and have it listen
 
-How hard can it be? /s 
+times like this i miss js
+
+then i look at js again and get back to trying to async rust
+
+---
 
 # LICENSE
 
