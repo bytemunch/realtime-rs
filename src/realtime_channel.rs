@@ -37,8 +37,10 @@ impl RealtimeChannel {
             message_ref: Some("init".to_owned()), // TODO idk what this does
         };
 
-        // TODO un unwrap
-        let _ = client.socket.lock().unwrap().send(join_message.into());
+        let mut socket = client.socket.lock().unwrap();
+        let _ = socket.send(join_message.into());
+        drop(socket);
+
         RealtimeChannel {
             topic,
             callbacks: vec![],
@@ -46,16 +48,18 @@ impl RealtimeChannel {
     }
 
     pub fn on(&mut self, event: PostgresEvent, callback: impl FnMut(&RealtimeMessage) + 'static) {
+        println!("Registered {:?} callback.", event);
         self.callbacks.push((event, Box::new(callback)));
     }
 
     pub fn recieve(&mut self, message: RealtimeMessage) {
         let Payload::PostgresChange(ref payload) = message.payload else {
+            println!("Channel dropping message: {:?}", message);
             return;
         };
 
         for cb in &mut self.callbacks {
-            if cb.0 == payload.data.change_type {
+            if cb.0 == payload.data.change_type || cb.0 == PostgresEvent::All {
                 cb.1(&message);
             }
         }

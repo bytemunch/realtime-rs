@@ -8,7 +8,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
-    thread,
+    thread::{self, sleep},
     time::Duration,
 };
 
@@ -17,7 +17,7 @@ use serde_json::Value;
 use tungstenite::{
     client::IntoClientRequest,
     connect,
-    http::{HeaderMap, HeaderValue},
+    http::{HeaderMap, HeaderValue, StatusCode},
     stream::MaybeTlsStream,
     Message, WebSocket,
 };
@@ -69,8 +69,8 @@ pub struct PostgresChangeData {
     columns: Vec<PostgresColumn>,
     commit_timestamp: String,
     errors: Option<String>,
-    old_record: PostgresOldDataRef,
-    record: HashMap<String, Value>,
+    old_record: Option<PostgresOldDataRef>,
+    record: Option<HashMap<String, Value>>,
     #[serde(rename = "type")]
     pub change_type: PostgresEvent,
     schema: String,
@@ -251,7 +251,7 @@ impl RealtimeClient {
     fn start() {}
 
     // Test fn
-    pub fn connect(local: bool, port: isize) -> RealtimeClient {
+    pub fn connect(local: bool, port: Option<isize>) -> RealtimeClient {
         let supabase_id = env::var("SUPABASE_ID").unwrap();
         let anon_key = env::var("ANON_KEY").unwrap();
         let _service_key = env::var("SERVICE_KEY").unwrap();
@@ -267,7 +267,8 @@ impl RealtimeClient {
         } else {
             format!(
                 "ws://127.0.0.1:{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-                port, local_anon_key
+                port.unwrap(),
+                local_anon_key
             )
         };
 
@@ -280,12 +281,15 @@ impl RealtimeClient {
         let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
         headers.insert("X-Client-Info", xci);
 
-        println!("Connecting: {:?}", req);
+        println!("Connecting... Req: {:?}\n", req);
 
         let conn = connect(req);
 
-        let (socket, _res) = conn.expect("Uhoh connection broke");
-        // TODO check response.status is 101
+        let (socket, res) = conn.expect("Uhoh connection broke");
+
+        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
+            panic!("101 code not recieved.");
+        }
 
         let socket = Arc::new(Mutex::new(socket));
 
@@ -295,20 +299,50 @@ impl RealtimeClient {
 
         let inbound_tx = inbound_channel.0.clone();
 
-        thread::spawn(move || loop {
+        let _socket_thread = thread::spawn(move || loop {
             // Recieve from server
-            let msg = loop_socket
-                .lock()
-                .unwrap()
-                .read()
-                .expect("Error reading message");
+            let mut socket = loop_socket.lock().unwrap();
+            let raw_message = socket.read().expect("Error reading message");
+            // TODO lock held here if nothing to read.
+            drop(socket);
 
-            let msg = msg.to_text().unwrap();
+            let msg = raw_message.to_text().unwrap();
 
             let msg: RealtimeMessage = serde_json::from_str(msg).expect("Json like complex demon");
+
             // TODO error handling; match on msg values
+            match msg.payload {
+                Payload::Empty {} => {
+                    println!(
+                        "Possibly malformed payload: {:?}",
+                        raw_message.to_text().unwrap()
+                    )
+                }
+                _ => {}
+            }
             let _ = inbound_tx.send(msg);
         });
+
+        let heartbeat_socket = Arc::clone(&socket);
+
+        let _heartbeat_thread = thread::spawn(move || loop {
+            // sleep thread
+            sleep(Duration::from_secs(1));
+
+            println!("Heartbeat.");
+
+            match heartbeat_socket.lock() {
+                Ok(mut socket) => {
+                    let _ = socket.send(RealtimeMessage::heartbeat().into());
+                    drop(socket);
+                }
+                Err(err) => {
+                    println!("mutex hard. {:?}", err);
+                }
+            };
+        });
+
+        println!("Socket ready!");
 
         RealtimeClient {
             socket,
@@ -326,6 +360,7 @@ impl RealtimeClient {
         match self.socket.lock() {
             Ok(mut socket) => {
                 let _ = socket.send(RealtimeMessage::heartbeat().into());
+                drop(socket);
             }
             Err(err) => {
                 println!("mutex hard. {:?}", err);
@@ -337,6 +372,7 @@ impl RealtimeClient {
         match self.socket.lock() {
             Ok(mut socket) => {
                 let _ = socket.send(msg.into());
+                drop(socket);
             }
             Err(err) => {
                 println!("mutex hard. {:?}", err);
@@ -357,6 +393,7 @@ impl RealtimeClient {
     pub fn listen(&mut self) {
         for message in &self.inbound_channel.1 {
             let Some(c) = self.channels.get_mut(&message.topic) else {
+                println!("Dropping off-topic message: {:?}", message);
                 continue;
             };
 
