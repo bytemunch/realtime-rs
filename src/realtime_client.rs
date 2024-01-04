@@ -2,8 +2,8 @@
 
 use std::{
     collections::HashMap,
-    env,
-    net::TcpStream,
+    env, io,
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
@@ -15,37 +15,18 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tungstenite::{
-    client::IntoClientRequest,
-    connect,
-    http::{HeaderMap, HeaderValue, StatusCode},
-    stream::MaybeTlsStream,
-    Message, WebSocket,
+    client::{uri_mode, IntoClientRequest},
+    client_tls,
+    error::UrlError,
+    handshake::MidHandshake,
+    http::{HeaderMap, HeaderValue, Response, StatusCode, Uri},
+    stream::{MaybeTlsStream, Mode, NoDelay},
+    ClientHandshake, Error, HandshakeError, Message, WebSocket,
 };
 
 use crate::{constants::MessageEvent, realtime_channel::RealtimeChannel};
 
-// this is where all the client structs and methods go :)
-// pretty sure writing client first is the way to go
-// but client needs channel
-// and channel needs client
-//
-// client holds multiple channels
-// client holds socket connection
-// client forwards messages to correct channel(s)
-// client manages heartbeat
-//
-// channels hold ref to their topic
-// channels hold ref to presence
-// channels forward events to callbacks
-// channels register callbacks e.g.:
-//
-// &mut mychannel;
-// fn filter_fn() {};
-// fn do_something_rad(msg: RealtimePayload) {}
-//  mychannel.on(EventType::Any, filter_fn, do_something_rad);
-//
-// presence is a black box to me right now i'll deal with that laterr
-
+// TODO move structs to own file
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum Payload {
@@ -199,7 +180,7 @@ impl RealtimeMessage {
 
 impl Into<Message> for RealtimeMessage {
     fn into(self) -> Message {
-        let data = serde_json::to_string(&self).expect("Uhoh cannot into message!");
+        let data = serde_json::to_string(&self).expect("Uhoh cannot into message");
         Message::Text(data)
     }
 }
@@ -259,21 +240,25 @@ impl RealtimeClient {
         let local_anon_key = env::var("LOCAL_ANON_KEY").unwrap();
         let _local_service_key = env::var("LOCAL_SERVICE_KEY").unwrap();
 
-        let url = if !local {
+        let uri: Uri = if !local {
             format!(
                 "wss://{}.supabase.co/realtime/v1/websocket?apikey={}&vsn=1.0.0",
                 supabase_id, anon_key
             )
+            .parse()
+            .unwrap()
         } else {
             format!(
                 "ws://127.0.0.1:{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
                 port.unwrap(),
                 local_anon_key
             )
+            .parse()
+            .unwrap()
         };
 
-        let mut req = url.into_client_request().unwrap();
-        let headers = req.headers_mut();
+        let mut request = uri.clone().into_client_request().unwrap();
+        let headers = request.headers_mut();
 
         let auth: HeaderValue = format!("Bearer {}", anon_key).parse().unwrap();
         headers.insert("Authorization", auth);
@@ -281,11 +266,104 @@ impl RealtimeClient {
         let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
         headers.insert("X-Client-Info", xci);
 
-        println!("Connecting... Req: {:?}\n", req);
+        println!("Connecting... Req: {:?}\n", request);
 
-        let conn = connect(req);
+        let uri = request.uri();
+        let mode = uri_mode(uri).expect("URI mode broke.");
+        let host = request
+            .uri()
+            .host()
+            .ok_or(Error::Url(UrlError::NoHostName))
+            .expect("Malformed URI.");
 
-        let (socket, res) = conn.expect("Uhoh connection broke");
+        let host = if host.starts_with('[') {
+            &host[1..host.len() - 1]
+        } else {
+            host
+        };
+
+        let port = uri.port_u16().unwrap_or(match mode {
+            Mode::Plain => 80,
+            Mode::Tls => 443,
+        });
+
+        let addrs = (host, port)
+            .to_socket_addrs()
+            .expect("Couldn't generate addrs");
+
+        fn get_stream(addrs: &[SocketAddr], uri: &Uri) -> Result<TcpStream, ()> {
+            for addr in addrs {
+                println!("Trying to contact {} at {}...", uri, addr);
+                if let Ok(stream) = TcpStream::connect(addr) {
+                    return Ok(stream);
+                }
+            }
+
+            Err(())
+        }
+
+        let mut stream =
+            get_stream(addrs.as_slice(), uri).expect("Couldn't get stream from addrs.");
+
+        NoDelay::set_nodelay(&mut stream, true).expect("Couldn't set NoDelay");
+
+        stream
+            .set_nonblocking(true)
+            .expect("Couldn't set stream nonblocking");
+
+        // TODO alias these types if they keep coming up
+        fn retry_handshake(
+            mid_hs: MidHandshake<ClientHandshake<MaybeTlsStream<TcpStream>>>,
+        ) -> Result<
+            (
+                WebSocket<MaybeTlsStream<TcpStream>>,
+                tungstenite::http::Response<Option<Vec<u8>>>,
+            ),
+            Error,
+        > {
+            match mid_hs.handshake() {
+                Ok(stream) => {
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    match e {
+                        HandshakeError::Interrupted(mid_hs) => {
+                            // recurse TODO is this a good idea? look into rust recursion
+                            return retry_handshake(mid_hs);
+                        }
+                        HandshakeError::Failure(err) => {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn get_connection<R>(
+            request: R,
+            stream: TcpStream,
+        ) -> Result<
+            (
+                WebSocket<MaybeTlsStream<TcpStream>>,
+                Response<Option<Vec<u8>>>,
+            ),
+            Error,
+        >
+        where
+            R: IntoClientRequest,
+        {
+            match client_tls(request, stream) {
+                Ok(stream) => Ok(stream),
+                Err(err) => match err {
+                    HandshakeError::Failure(err) => Err(err),
+                    HandshakeError::Interrupted(mid_hs) => return retry_handshake(mid_hs),
+                },
+            }
+        }
+
+        let conn = get_connection(request, stream).expect("Connection failed");
+
+        let (socket, res) = conn;
 
         if res.status() != StatusCode::SWITCHING_PROTOCOLS {
             panic!("101 code not recieved.");
@@ -301,35 +379,49 @@ impl RealtimeClient {
 
         let _socket_thread = thread::spawn(move || loop {
             // Recieve from server
-            let mut socket = loop_socket.lock().unwrap();
-            let raw_message = socket.read().expect("Error reading message");
-            // TODO lock held here if nothing to read.
-            drop(socket);
+            // TODO nested way too much for my liking
+            match loop_socket.lock() {
+                Ok(mut socket) => {
+                    match socket.read() {
+                        Ok(raw_message) => {
+                            let msg = raw_message.to_text().unwrap();
 
-            let msg = raw_message.to_text().unwrap();
+                            let msg: RealtimeMessage =
+                                serde_json::from_str(msg).expect("Deserialization error: ");
 
-            let msg: RealtimeMessage = serde_json::from_str(msg).expect("Json like complex demon");
+                            // TODO error handling; match on all msg values
+                            match msg.payload {
+                                Payload::Empty {} => {
+                                    println!(
+                                        "Possibly malformed payload: {:?}",
+                                        raw_message.to_text().unwrap()
+                                    )
+                                }
+                                _ => {}
+                            }
+                            let _ = inbound_tx.send(msg);
+                        }
+                        Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                            // do nothing here :)
+                        }
+                        Err(err) => {
+                            println!("Socket read error: {:?}", err);
+                        }
+                    }
 
-            // TODO error handling; match on msg values
-            match msg.payload {
-                Payload::Empty {} => {
-                    println!(
-                        "Possibly malformed payload: {:?}",
-                        raw_message.to_text().unwrap()
-                    )
+                    drop(socket);
                 }
-                _ => {}
+                Err(err) => {
+                    println!("Socket thread: mutex hard. {:?}", err);
+                }
             }
-            let _ = inbound_tx.send(msg);
         });
 
         let heartbeat_socket = Arc::clone(&socket);
 
         let _heartbeat_thread = thread::spawn(move || loop {
             // sleep thread
-            sleep(Duration::from_secs(1));
-
-            println!("Heartbeat.");
+            sleep(Duration::from_secs(29));
 
             match heartbeat_socket.lock() {
                 Ok(mut socket) => {
@@ -337,12 +429,12 @@ impl RealtimeClient {
                     drop(socket);
                 }
                 Err(err) => {
-                    println!("mutex hard. {:?}", err);
+                    println!("Heartbeat thread: mutex hard. {:?}", err);
                 }
             };
         });
 
-        println!("Socket ready!");
+        println!("Socket ready");
 
         RealtimeClient {
             socket,
@@ -354,28 +446,19 @@ impl RealtimeClient {
         // socket.close(None);
     }
 
-    fn disconnect() {}
-
-    fn heartbeat(&mut self) {
-        match self.socket.lock() {
-            Ok(mut socket) => {
-                let _ = socket.send(RealtimeMessage::heartbeat().into());
-                drop(socket);
-            }
-            Err(err) => {
-                println!("mutex hard. {:?}", err);
-            }
-        };
+    fn disconnect() {
+        // TODO
     }
 
-    fn send(&mut self, msg: RealtimeMessage) {
+    pub fn send(&mut self, msg: RealtimeMessage) {
         match self.socket.lock() {
             Ok(mut socket) => {
+                println!("Sending: {:?}", msg);
                 let _ = socket.send(msg.into());
                 drop(socket);
             }
             Err(err) => {
-                println!("mutex hard. {:?}", err);
+                println!("Send: mutex hard. {:?}", err);
             }
         };
     }

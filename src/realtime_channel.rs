@@ -37,9 +37,7 @@ impl RealtimeChannel {
             message_ref: Some("init".to_owned()), // TODO idk what this does
         };
 
-        let mut socket = client.socket.lock().unwrap();
-        let _ = socket.send(join_message.into());
-        drop(socket);
+        client.send(join_message.into());
 
         RealtimeChannel {
             topic,
