@@ -16,7 +16,7 @@ fn main() {
         }],
     );
 
-    let _ = channel_1.on(PostgresEvent::All, |msg| {
+    let c1_all = channel_1.on(PostgresEvent::All, |msg| {
         println!("Channel 1, All:\n{:?}", msg)
     });
 
@@ -28,9 +28,12 @@ fn main() {
         println!("Channel 1, Delete:\n{:?}", msg)
     });
 
-    let _ = channel_1.on(PostgresEvent::Insert, |msg| {
+    let c1_insert = channel_1.on(PostgresEvent::Insert, |msg| {
         println!("Channel 1, Insert:\n{:?}", msg)
     });
+
+    let _ = channel_1.drop(c1_all);
+    let _ = channel_1.drop(c1_insert);
 
     let channel_2 = client.channel(
         "channel_2".to_string(),

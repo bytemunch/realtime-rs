@@ -1,16 +1,19 @@
+use uuid::Uuid;
+
 use crate::constants::MessageEvent;
 use crate::realtime_client::Payload::{self};
 use crate::realtime_client::{
     JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, PostgresChange,
     PostgresEvent, RealtimeClient, RealtimeMessage,
 };
+use std::collections::HashMap;
 use std::fmt::Debug;
+
+pub type RealtimeCallback = (PostgresEvent, Box<dyn FnMut(&RealtimeMessage)>);
 
 pub struct RealtimeChannel {
     pub topic: String,
-    pub callbacks: Vec<(PostgresEvent, Box<dyn FnMut(&RealtimeMessage)>)>, // TODO this is not the right memory
-                                                                           // layout, or something,
-                                                                           // probably
+    pub callbacks: HashMap<Uuid, RealtimeCallback>,
 }
 
 impl RealtimeChannel {
@@ -41,13 +44,27 @@ impl RealtimeChannel {
 
         RealtimeChannel {
             topic,
-            callbacks: vec![],
+            callbacks: HashMap::new(),
         }
     }
 
-    pub fn on(&mut self, event: PostgresEvent, callback: impl FnMut(&RealtimeMessage) + 'static) {
-        println!("Registered {:?} callback.", event);
-        self.callbacks.push((event, Box::new(callback)));
+    pub fn on(
+        &mut self,
+        event: PostgresEvent,
+        callback: impl FnMut(&RealtimeMessage) + 'static,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        self.callbacks.insert(id, (event, Box::new(callback)));
+        println!("Registered callback {:?}", id);
+        return id;
+    }
+
+    pub fn drop(&mut self, uuid: Uuid) -> Result<RealtimeCallback, &str> {
+        println!("Removed callback {:?}", uuid);
+        match self.callbacks.remove(&uuid) {
+            Some(callback) => Ok(callback),
+            None => Err("Callback not found."),
+        }
     }
 
     pub fn recieve(&mut self, message: RealtimeMessage) {
@@ -57,8 +74,9 @@ impl RealtimeChannel {
         };
 
         for cb in &mut self.callbacks {
-            if cb.0 == payload.data.change_type || cb.0 == PostgresEvent::All {
-                cb.1(&message);
+            // TODO chained numerical accessors ewwwwwwwwwww
+            if cb.1 .0 == payload.data.change_type || cb.1 .0 == PostgresEvent::All {
+                cb.1 .1(&message);
             }
         }
     }

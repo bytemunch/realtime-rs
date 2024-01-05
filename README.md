@@ -14,10 +14,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
    > i had to learn what a `Box<dyn T>` is for this one, it was horrible
  - [x] Heartbeat
    > i <3 threads
+- [x] Drop callbacks from channels
 
 ### TODOs
 
-- [ ] Drop callbacks from channels
 - [ ] Disconnecting Channels
 - [ ] Disconnecting client
 - [ ] Configurable heartbeat interval
