@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
+use std::fmt::Debug;
 use std::{
     collections::HashMap,
     env, io,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver, Sender, TryRecvError},
         Arc, Mutex,
     },
     thread::{self, sleep},
@@ -23,6 +24,7 @@ use tungstenite::{
     stream::{MaybeTlsStream, Mode, NoDelay},
     ClientHandshake, Error, HandshakeError, Message, WebSocket,
 };
+use uuid::Uuid;
 
 use crate::{constants::MessageEvent, realtime_channel::RealtimeChannel};
 
@@ -219,13 +221,26 @@ impl Default for RealtimeClientOptions {
     }
 }
 
-#[derive(Debug)]
 pub struct RealtimeClient {
     pub socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
     channels: HashMap<String, RealtimeChannel>,
     inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
+}
+
+impl Debug for RealtimeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{:?} {:?} {:?} {:?} {}",
+            self.socket,
+            self.channels,
+            self.inbound_channel,
+            self.options,
+            "TODO middleware debug fmt"
+        ))
+    }
 }
 
 impl RealtimeClient {
@@ -439,6 +454,7 @@ impl RealtimeClient {
         RealtimeClient {
             socket,
             channels: HashMap::new(),
+            middleware: HashMap::new(),
             inbound_channel,
             options: RealtimeClientOptions::default(),
         }
@@ -450,7 +466,7 @@ impl RealtimeClient {
         // TODO
     }
 
-    pub fn send(&mut self, msg: RealtimeMessage) {
+    pub(crate) fn send(&mut self, msg: RealtimeMessage) {
         match self.socket.lock() {
             Ok(mut socket) => {
                 println!("Sending: {:?}", msg);
@@ -473,6 +489,56 @@ impl RealtimeClient {
         self.channels.get_mut(&topic).unwrap()
     }
 
+    pub fn drop_channel(&mut self, topic: String) -> Option<RealtimeChannel> {
+        self.channels.remove(&topic)
+    }
+
+    pub fn add_middleware(
+        &mut self,
+        middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>,
+    ) -> Uuid {
+        let uuid = Uuid::new_v4();
+        self.middleware.insert(uuid, middleware);
+        uuid
+    }
+
+    pub fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {
+        for (_uuid, middleware) in &self.middleware {
+            message = middleware(message)
+        }
+        message
+    }
+
+    pub fn remove_middleware(
+        &mut self,
+        uuid: Uuid,
+    ) -> Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>> {
+        self.middleware.remove(&uuid)
+    }
+
+    /// Polls next message from socket. Returns the topic of the channel that has been forwarded
+    /// the message, or a TryRecvError. Can return WouldBlock
+    pub fn next_message(&mut self) -> Result<String, NextMessageError> {
+        let message = self.inbound_channel.1.try_recv();
+
+        match message {
+            Ok(message) => {
+                // TODO filter system messages and the like
+                // Send message to channel
+                let Some(channel) = self.channels.get_mut(&message.topic) else {
+                    return Err(NextMessageError::NoChannel);
+                };
+
+                channel.recieve(message);
+
+                Ok(channel.topic.clone())
+            }
+            Err(TryRecvError::Empty) => Err(NextMessageError::WouldBlock),
+            Err(e) => Err(NextMessageError::TryRecvError(e)),
+        }
+    }
+
+    /// Blocking listener loop, use if all business logic is in callbacks
     pub fn listen(&mut self) {
         for message in &self.inbound_channel.1 {
             let Some(c) = self.channels.get_mut(&message.topic) else {
@@ -483,4 +549,11 @@ impl RealtimeClient {
             c.recieve(message);
         }
     }
+}
+
+#[derive(Debug)]
+pub enum NextMessageError {
+    WouldBlock,
+    TryRecvError(TryRecvError),
+    NoChannel,
 }

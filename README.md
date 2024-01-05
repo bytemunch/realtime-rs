@@ -15,11 +15,15 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Heartbeat
    > i <3 threads
 - [x] Drop callbacks from channels
+- [x] Disconnecting Channels
+- [x] Middleware
+  > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
 
 ### TODOs
 
-- [ ] Disconnecting Channels
 - [ ] Disconnecting client
+- [ ] Channel states
+- [ ] Client states
 - [ ] Configurable heartbeat interval
 - [ ] Learn what a message ref does and who should set it
 - [ ] Presence (i don't have the first clue here, research day incoming)

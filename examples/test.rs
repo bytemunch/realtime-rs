@@ -1,4 +1,6 @@
-use realtime_rs::realtime_client::{PostgresChange, PostgresEvent, RealtimeClient};
+use realtime_rs::realtime_client::{
+    NextMessageError, PostgresChange, PostgresEvent, RealtimeClient,
+};
 
 const LOCAL: bool = true;
 const LOCAL_PORT: isize = 54321;
@@ -49,7 +51,19 @@ fn main() {
         println!("Channel 2:\n{:?}", msg)
     });
 
-    client.listen(); // spin loop to wait for messages...
-
     println!("Client created: {:?}", client);
+
+    loop {
+        match client.next_message() {
+            Ok(topic) => {
+                println!("Message forwarded to {:?}", topic)
+            }
+            Err(NextMessageError::WouldBlock) => {}
+            Err(e) => {
+                println!("NextMessageError: {:?}", e)
+            }
+        }
+    }
+
+    //client.listen(); // spin loop to wait for messages...
 }
