@@ -4,6 +4,9 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ## Progress
 
+# HI TOMORROW SAM
+You're working on Broadcast. Nearly cracked it but gotta add a way to block until subscribe is done, think is always desired when working sync.
+
 ### Working so far
 
  - [x] Websocket client
@@ -18,16 +21,17 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 - [x] Disconnecting Channels
 - [x] Middleware
   > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
+- [x] Broadcast
+  > Very basic implementation, so far untested across different devices
 
 ### TODOs
 
 - [ ] Disconnecting client
 - [ ] Channel states
 - [ ] Client states
+- [ ] Middleware example
 - [ ] Configurable heartbeat interval
-- [ ] Learn what a message ref does and who should set it
 - [ ] Presence (i don't have the first clue here, research day incoming)
-- [ ] Broadcast (as above)
 - [ ] Async client
 - [ ] Lock down a clean API
 - [ ] Anything else I can find to do before writing tests

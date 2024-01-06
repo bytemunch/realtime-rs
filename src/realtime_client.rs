@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::{constants::MessageEvent, realtime_channel::RealtimeChannel};
 
 // TODO move structs to own file
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Payload {
     Join(JoinPayload),
@@ -37,17 +37,42 @@ pub enum Payload {
     System(SystemPayload),
     AccessToken(AccessTokenPayload),
     PostgresChange(PostgresChangePayload), // TODO rename because clashes
+    Broadcast(BroadcastPayload),
     Empty {}, // TODO perf: implement custom deser cos this bad. typechecking: this matches
               // everything that can't deser elsewhere. not good.
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl Default for Payload {
+    fn default() -> Self {
+        Payload::Broadcast(BroadcastPayload::default())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BroadcastPayload {
+    pub event: String,
+    pub payload: HashMap<String, Value>,
+    #[serde(rename = "type")]
+    pub broadcast_type: String, // TODO this is always 'broadcast', impl custom serde ;_;
+}
+
+impl Default for BroadcastPayload {
+    fn default() -> Self {
+        BroadcastPayload {
+            event: "event_missing".into(),
+            payload: HashMap::new(),
+            broadcast_type: "broadcast".into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PostgresChangePayload {
     pub data: PostgresChangeData,
     ids: Vec<usize>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PostgresChangeData {
     columns: Vec<PostgresColumn>,
     commit_timestamp: String,
@@ -67,24 +92,24 @@ enum RecordValue {
     String(String),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct PostgresColumn {
     name: String,
     #[serde(rename = "type")]
     column_type: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct PostgresOldDataRef {
     id: isize,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AccessTokenPayload {
     access_token: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemPayload {
     channel: String,
     extension: String,
@@ -92,31 +117,31 @@ pub struct SystemPayload {
     status: PayloadStatus,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinPayload {
     pub config: JoinConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinConfig {
     pub broadcast: JoinConfigBroadcast,
     pub presence: JoinConfigPresence,
     pub postgres_changes: Vec<PostgresChange>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinConfigBroadcast {
     #[serde(rename = "self")]
     pub(crate) broadcast_self: bool,
     pub(crate) ack: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinConfigPresence {
     pub key: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Default, Clone)]
 pub enum PostgresEvent {
     #[serde(rename = "*")]
     #[default]
@@ -129,10 +154,8 @@ pub enum PostgresEvent {
     Delete,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct PostgresChange {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<isize>,
     pub event: PostgresEvent,
     pub schema: String,
     pub table: String,
@@ -140,18 +163,18 @@ pub struct PostgresChange {
     pub filter: Option<String>, // TODO structured filters
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinResponsePayload {
-    response: JoinResponse,
-    status: PayloadStatus,
+    pub response: JoinResponse,
+    pub status: PayloadStatus,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct JoinResponse {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JoinResponse {
     postgres_changes: Vec<PostgresChange>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum PayloadStatus {
     #[serde(rename = "ok")]
     Ok,
@@ -159,7 +182,7 @@ pub enum PayloadStatus {
     Error,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct RealtimeMessage {
     pub event: MessageEvent,
     pub topic: String,
@@ -184,6 +207,64 @@ impl Into<Message> for RealtimeMessage {
     fn into(self) -> Message {
         let data = serde_json::to_string(&self).expect("Uhoh cannot into message");
         Message::Text(data)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum MessageFilterEvent {
+    PostgresCDC(PostgresEvent),
+    Custom(String),
+}
+
+impl Default for MessageFilterEvent {
+    fn default() -> Self {
+        MessageFilterEvent::Custom("".into())
+    }
+}
+
+// TODO builder pattern for filter?
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct MessageFilter {
+    pub event: MessageFilterEvent,
+    pub schema: String,
+    pub table: Option<String>,
+    pub filter: Option<String>,
+}
+
+impl MessageFilter {
+    fn check(self, message: RealtimeMessage) -> Option<RealtimeMessage> {
+        match self.event {
+            MessageFilterEvent::PostgresCDC(postgres_event) => {
+                let Payload::PostgresChange(payload) = &message.payload else {
+                    println!("Malformed payload? Or something");
+                    return None;
+                };
+
+                if let Some(table) = self.table {
+                    if table != payload.data.table {
+                        return None;
+                    }
+                }
+
+                if let Some(_filter) = self.filter {
+                    println!("db filters not implemented!");
+                }
+
+                if (postgres_event == PostgresEvent::All
+                    || payload.data.change_type == postgres_event)
+                    && payload.data.schema == self.schema
+                {
+                    return Some(message);
+                }
+            }
+            MessageFilterEvent::Custom(event) => {
+                if event == serde_json::to_string(&message.event).expect("whoops") {
+                    return Some(message);
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -223,8 +304,9 @@ impl Default for RealtimeClientOptions {
 
 pub struct RealtimeClient {
     pub socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
-    channels: HashMap<String, RealtimeChannel>,
+    channels: HashMap<Uuid, RealtimeChannel>,
     inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    pub(crate) outbound_tx: Sender<RealtimeMessage>,
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
@@ -233,10 +315,11 @@ pub struct RealtimeClient {
 impl Debug for RealtimeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "{:?} {:?} {:?} {:?} {}",
+            "{:?} {:?} {:?} {:?} {:?} {}",
             self.socket,
             self.channels,
             self.inbound_channel,
+            self.outbound_tx,
             self.options,
             "TODO middleware debug fmt"
         ))
@@ -387,25 +470,48 @@ impl RealtimeClient {
         let socket = Arc::new(Mutex::new(socket));
 
         let inbound_channel = mpsc::channel::<RealtimeMessage>();
+        let outbound_channel = mpsc::channel::<RealtimeMessage>();
 
         let loop_socket = Arc::clone(&socket);
 
         let inbound_tx = inbound_channel.0.clone();
 
+        let outbound_tx = outbound_channel.0;
+        let outbound_rx = outbound_channel.1;
+
         let _socket_thread = thread::spawn(move || loop {
-            // Recieve from server
             // TODO nested way too much for my liking
+            //
+            // get lock
             match loop_socket.lock() {
                 Ok(mut socket) => {
+                    // Send to server
+                    let message = outbound_rx.try_recv();
+
+                    match message {
+                        Ok(message) => {
+                            println!("[SEND] {:?}", message);
+                            let _ = socket.send(message.into());
+                        }
+                        Err(TryRecvError::Empty) => { // do nothing
+                        }
+                        Err(e) => {
+                            println!("outbound error: {:?}", e);
+                        }
+                    }
+
+                    // Recieve from server
                     match socket.read() {
                         Ok(raw_message) => {
                             let msg = raw_message.to_text().unwrap();
 
-                            let msg: RealtimeMessage =
+                            let message: RealtimeMessage =
                                 serde_json::from_str(msg).expect("Deserialization error: ");
 
+                            println!("[RECV] {:?}", message);
+
                             // TODO error handling; match on all msg values
-                            match msg.payload {
+                            match message.payload {
                                 Payload::Empty {} => {
                                     println!(
                                         "Possibly malformed payload: {:?}",
@@ -414,7 +520,7 @@ impl RealtimeClient {
                                 }
                                 _ => {}
                             }
-                            let _ = inbound_tx.send(msg);
+                            let _ = inbound_tx.send(message);
                         }
                         Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
                             // do nothing here :)
@@ -456,6 +562,7 @@ impl RealtimeClient {
             channels: HashMap::new(),
             middleware: HashMap::new(),
             inbound_channel,
+            outbound_tx,
             options: RealtimeClientOptions::default(),
         }
 
@@ -466,7 +573,7 @@ impl RealtimeClient {
         // TODO
     }
 
-    pub(crate) fn send(&mut self, msg: RealtimeMessage) {
+    pub fn send(&mut self, msg: RealtimeMessage) {
         match self.socket.lock() {
             Ok(mut socket) => {
                 println!("Sending: {:?}", msg);
@@ -479,24 +586,31 @@ impl RealtimeClient {
         };
     }
 
-    pub fn channel(&mut self, topic: String, changes: Vec<PostgresChange>) -> &mut RealtimeChannel {
+    pub fn channel(&mut self, topic: String) -> &mut RealtimeChannel {
         let topic = format!("realtime:{}", topic);
 
-        let new_channel = RealtimeChannel::new(self, topic.clone(), changes);
+        let new_channel = RealtimeChannel::new(self, topic.clone());
 
-        self.channels.insert(topic.clone(), new_channel);
+        let id = new_channel.id.clone();
 
-        self.channels.get_mut(&topic).unwrap()
+        self.channels.insert(id, new_channel);
+
+        self.channels.get_mut(&id).unwrap()
     }
 
-    pub fn drop_channel(&mut self, topic: String) -> Option<RealtimeChannel> {
-        self.channels.remove(&topic)
+    pub fn get_channel(&self, channel_id: Uuid) -> Option<&RealtimeChannel> {
+        self.channels.get(&channel_id)
+    }
+
+    pub fn drop_channel(&mut self, channel_id: Uuid) -> Option<RealtimeChannel> {
+        self.channels.remove(&channel_id)
     }
 
     pub fn add_middleware(
         &mut self,
         middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>,
     ) -> Uuid {
+        // TODO user defined middleware ordering
         let uuid = Uuid::new_v4();
         self.middleware.insert(uuid, middleware);
         uuid
@@ -518,20 +632,26 @@ impl RealtimeClient {
 
     /// Polls next message from socket. Returns the topic of the channel that has been forwarded
     /// the message, or a TryRecvError. Can return WouldBlock
-    pub fn next_message(&mut self) -> Result<String, NextMessageError> {
+    pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         let message = self.inbound_channel.1.try_recv();
 
         match message {
-            Ok(message) => {
+            Ok(mut message) => {
+                let mut ids = vec![];
                 // TODO filter system messages and the like
+
+                // Run middleware
+                message = self.run_middleware(message);
+
                 // Send message to channel
-                let Some(channel) = self.channels.get_mut(&message.topic) else {
-                    return Err(NextMessageError::NoChannel);
-                };
+                for (id, channel) in &mut self.channels {
+                    if channel.topic == message.topic {
+                        channel.recieve(message.clone());
+                        ids.push(id.clone());
+                    }
+                }
 
-                channel.recieve(message);
-
-                Ok(channel.topic.clone())
+                Ok(ids)
             }
             Err(TryRecvError::Empty) => Err(NextMessageError::WouldBlock),
             Err(e) => Err(NextMessageError::TryRecvError(e)),
@@ -541,12 +661,13 @@ impl RealtimeClient {
     /// Blocking listener loop, use if all business logic is in callbacks
     pub fn listen(&mut self) {
         for message in &self.inbound_channel.1 {
-            let Some(c) = self.channels.get_mut(&message.topic) else {
-                println!("Dropping off-topic message: {:?}", message);
-                continue;
-            };
-
-            c.recieve(message);
+            // TODO filter system messages and the like
+            // Send message to channel
+            for (_id, channel) in &mut self.channels {
+                if channel.topic == message.topic {
+                    channel.recieve(message.clone());
+                }
+            }
         }
     }
 }

@@ -23,8 +23,7 @@ pub enum ConnectionState {
     Closed,
 }
 
-// TODO impl Display
-/// Each should be evaluated as lowercase variant name
+#[derive(PartialEq)]
 pub enum ChannelState {
     Closed,
     Errored,
@@ -34,7 +33,7 @@ pub enum ChannelState {
 }
 
 // TODO impl Display
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Default, Clone)]
 pub enum MessageEvent {
     #[serde(rename = "phx_close")]
     Close,
@@ -56,6 +55,9 @@ pub enum MessageEvent {
     Heartbeat,
     #[serde(rename = "postgres_changes")]
     PostgresChanges,
+    #[default]
+    #[serde(rename = "broadcast")]
+    Broadcast,
 }
 
 // TODO impl Display = "websocket"
