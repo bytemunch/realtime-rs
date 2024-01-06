@@ -1,3 +1,5 @@
+use std::env;
+
 use realtime_rs::{
     constants::MessageEvent,
     realtime_client::{
@@ -5,11 +7,11 @@ use realtime_rs::{
     },
 };
 
-const LOCAL: bool = true;
-const LOCAL_PORT: isize = 54321;
-
 fn main() {
-    let mut client = RealtimeClient::connect(LOCAL, Some(LOCAL_PORT));
+    let url = "ws://127.0.0.1:54321".into();
+    let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
+
+    let mut client = RealtimeClient::connect(url, anon_key);
 
     client
         .channel("channel_1".to_string())
@@ -38,6 +40,4 @@ fn main() {
             }
         }
     }
-
-    //client.listen(); // spin loop to wait for messages...
 }

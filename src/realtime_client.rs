@@ -327,33 +327,13 @@ impl Debug for RealtimeClient {
 }
 
 impl RealtimeClient {
-    fn start() {}
-
-    // Test fn
-    pub fn connect(local: bool, port: Option<isize>) -> RealtimeClient {
-        let supabase_id = env::var("SUPABASE_ID").unwrap();
-        let anon_key = env::var("ANON_KEY").unwrap();
-        let _service_key = env::var("SERVICE_KEY").unwrap();
-
-        let local_anon_key = env::var("LOCAL_ANON_KEY").unwrap();
-        let _local_service_key = env::var("LOCAL_SERVICE_KEY").unwrap();
-
-        let uri: Uri = if !local {
-            format!(
-                "wss://{}.supabase.co/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-                supabase_id, anon_key
-            )
-            .parse()
-            .unwrap()
-        } else {
-            format!(
-                "ws://127.0.0.1:{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-                port.unwrap(),
-                local_anon_key
-            )
-            .parse()
-            .unwrap()
-        };
+    pub fn connect(url: String, anon_key: String) -> RealtimeClient {
+        let uri: Uri = format!(
+            "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
+            url, anon_key
+        )
+        .parse()
+        .expect("Malformed URI");
 
         let mut request = uri.clone().into_client_request().unwrap();
         let headers = request.headers_mut();
@@ -565,12 +545,19 @@ impl RealtimeClient {
             outbound_tx,
             options: RealtimeClientOptions::default(),
         }
-
-        // socket.close(None);
     }
 
-    fn disconnect() {
-        // TODO
+    pub fn disconnect(&mut self) {
+        // TODO disconnect all channels
+        match self.socket.lock() {
+            Ok(mut socket) => {
+                // TODO error handling
+                let _ = socket.close(None);
+            }
+            Err(e) => {
+                println!("Disconnect: mutex hard. {:?}", e);
+            }
+        }
     }
 
     pub fn send(&mut self, msg: RealtimeMessage) {
@@ -633,6 +620,7 @@ impl RealtimeClient {
     /// Polls next message from socket. Returns the topic of the channel that has been forwarded
     /// the message, or a TryRecvError. Can return WouldBlock
     pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
+        // TODO check connection state here
         let message = self.inbound_channel.1.try_recv();
 
         match message {

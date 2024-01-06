@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env};
 
 use realtime_rs::{
     constants::{ChannelState, MessageEvent},
@@ -9,7 +9,10 @@ use realtime_rs::{
 };
 
 fn main() {
-    let mut client = RealtimeClient::connect(true, Some(54321));
+    let url = "ws://127.0.0.1:54321".into();
+    let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
+
+    let mut client = RealtimeClient::connect(url, anon_key);
 
     let channel_a = client
         .channel("room-1".into())
@@ -41,6 +44,7 @@ fn main() {
         }
 
         if sent_once {
+            client.disconnect();
             continue;
         }
 
