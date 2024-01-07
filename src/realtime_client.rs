@@ -248,7 +248,7 @@ impl MessageFilter {
                 }
 
                 if let Some(_filter) = self.filter {
-                    println!("db filters not implemented!");
+                    // Filters do not need to be checked client-side
                 }
 
                 if (postgres_event == PostgresEvent::All

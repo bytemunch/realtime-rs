@@ -6,7 +6,6 @@ use crate::realtime_client::{
     JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, MessageFilter,
     MessageFilterEvent, PayloadStatus, PostgresChange, RealtimeClient, RealtimeMessage,
 };
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc;
 
@@ -18,7 +17,7 @@ pub type RealtimeCallback = (
 
 pub struct RealtimeChannel {
     pub topic: String,
-    pub callbacks: HashMap<Uuid, RealtimeCallback>,
+    pub callbacks: Vec<RealtimeCallback>,
     tx: mpsc::Sender<RealtimeMessage>,
     postgres_changes: Vec<PostgresChange>,
     pub status: ChannelState,
@@ -31,7 +30,7 @@ impl RealtimeChannel {
 
         RealtimeChannel {
             topic,
-            callbacks: HashMap::new(),
+            callbacks: vec![],
             tx: client.outbound_tx.clone(),
             postgres_changes: vec![],
             status: ChannelState::Closed,
@@ -73,9 +72,6 @@ impl RealtimeChannel {
         filter: MessageFilter,
         callback: impl FnMut(&RealtimeMessage) + 'static,
     ) -> &mut Self {
-        // TODO don't need to ref callbacks so no ID needed, restructure callback map
-        let id = Uuid::new_v4();
-
         // modify self.postgres_changes with callback requirements
 
         if let MessageFilterEvent::PostgresCDC(cdc_event) = filter.event.clone() {
@@ -88,10 +84,8 @@ impl RealtimeChannel {
             });
         }
 
-        self.callbacks
-            .insert(id, (event, filter, Box::new(callback)));
+        self.callbacks.push((event, filter, Box::new(callback)));
 
-        println!("Registered callback {:?}", id);
         return self;
     }
 
@@ -109,7 +103,7 @@ impl RealtimeChannel {
             _ => {}
         }
 
-        for (_key, (event, filter, callback)) in &mut self.callbacks {
+        for (event, filter, callback) in &mut self.callbacks {
             // TODO clone clone clone clone clone
             if let Some(message) = filter.clone().check(message.clone()) {
                 if *event == message.event {
