@@ -1,10 +1,12 @@
 use std::env;
 
 use realtime_rs::{
-    constants::MessageEvent,
-    realtime_client::{
-        MessageFilter, MessageFilterEvent, NextMessageError, PostgresEvent, RealtimeClient,
+    message::{
+        message_filter::{MessageFilter, MessageFilterEvent},
+        payload::PostgresEvent,
+        realtime_message::MessageEvent,
     },
+    realtime_client::{NextMessageError, RealtimeClient},
 };
 
 fn main() {

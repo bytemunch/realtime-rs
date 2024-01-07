@@ -1,11 +1,13 @@
 use std::{collections::HashMap, env};
 
 use realtime_rs::{
-    constants::{ChannelState, MessageEvent},
-    realtime_client::{
-        BroadcastPayload, MessageFilter, MessageFilterEvent, NextMessageError, Payload,
-        RealtimeClient, RealtimeMessage,
+    message::{
+        message_filter::{MessageFilter, MessageFilterEvent},
+        payload::{BroadcastPayload, Payload},
+        realtime_message::{MessageEvent, RealtimeMessage},
     },
+    realtime_channel::ChannelState,
+    realtime_client::{NextMessageError, RealtimeClient},
 };
 
 fn main() {

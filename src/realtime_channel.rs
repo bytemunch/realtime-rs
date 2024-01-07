@@ -1,11 +1,12 @@
 use uuid::Uuid;
 
-use crate::constants::{ChannelState, MessageEvent};
-use crate::realtime_client::Payload::{self};
-use crate::realtime_client::{
-    JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, MessageFilter,
-    MessageFilterEvent, PayloadStatus, PostgresChange, RealtimeClient, RealtimeMessage,
+use crate::message::message_filter::{MessageFilter, MessageFilterEvent};
+use crate::message::payload::{
+    JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, Payload, PayloadStatus,
+    PostgresChange,
 };
+use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
+use crate::realtime_client::RealtimeClient;
 use std::fmt::Debug;
 use std::sync::mpsc;
 
@@ -14,6 +15,15 @@ pub type RealtimeCallback = (
     MessageFilter,
     Box<dyn FnMut(&RealtimeMessage)>,
 );
+
+#[derive(PartialEq)]
+pub enum ChannelState {
+    Closed,
+    Errored,
+    Joined,
+    Joining,
+    Leaving,
+}
 
 pub struct RealtimeChannel {
     pub topic: String,
