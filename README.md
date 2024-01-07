@@ -17,7 +17,6 @@ You're working on Broadcast. Nearly cracked it but gotta add a way to block unti
    > i had to learn what a `Box<dyn T>` is for this one, it was horrible
  - [x] Heartbeat
    > i <3 threads
-- [x] Drop callbacks from channels
 - [x] Disconnecting Channels
 - [x] Middleware
   > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
