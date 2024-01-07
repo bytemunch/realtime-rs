@@ -18,12 +18,12 @@ fn main() {
         .on(
             MessageEvent::PostgresChanges,
             MessageFilter {
-                event: MessageFilterEvent::PostgresCDC(PostgresEvent::All),
+                event: MessageFilterEvent::PostgresCDC(PostgresEvent::Update),
                 schema: "public".into(),
                 table: Some("todos".into()),
                 ..Default::default()
             },
-            |msg| println!("Channel 1, All:\n{:?}", msg),
+            |msg| println!("Channel 1, Update:\n{:?}", msg),
         )
         .subscribe();
 

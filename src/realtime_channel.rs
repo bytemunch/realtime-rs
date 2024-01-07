@@ -109,10 +109,12 @@ impl RealtimeChannel {
             _ => {}
         }
 
-        // TODO redo this callback system to incorporate new API and filters
-        for (_key, (event, _filter, callback)) in &mut self.callbacks {
-            if *event == message.event {
-                callback(&message);
+        for (_key, (event, filter, callback)) in &mut self.callbacks {
+            // TODO clone clone clone clone clone
+            if let Some(message) = filter.clone().check(message.clone()) {
+                if *event == message.event {
+                    callback(&message);
+                }
             }
         }
     }

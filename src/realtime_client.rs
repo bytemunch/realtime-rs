@@ -223,7 +223,7 @@ impl Default for MessageFilterEvent {
 }
 
 // TODO builder pattern for filter?
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct MessageFilter {
     pub event: MessageFilterEvent,
     pub schema: String,
@@ -232,16 +232,17 @@ pub struct MessageFilter {
 }
 
 impl MessageFilter {
-    fn check(self, message: RealtimeMessage) -> Option<RealtimeMessage> {
+    pub fn check(self, message: RealtimeMessage) -> Option<RealtimeMessage> {
         match self.event {
             MessageFilterEvent::PostgresCDC(postgres_event) => {
                 let Payload::PostgresChange(payload) = &message.payload else {
-                    println!("Malformed payload? Or something");
+                    println!("Dropping non CDC message: {:?}", message);
                     return None;
                 };
 
                 if let Some(table) = self.table {
                     if table != payload.data.table {
+                        println!("Dropping mismatched table message: {:?}", message);
                         return None;
                     }
                 }
@@ -256,11 +257,15 @@ impl MessageFilter {
                 {
                     return Some(message);
                 }
+
+                println!("Dropping mismatched CDC event: {:?}", message);
             }
             MessageFilterEvent::Custom(event) => {
                 if event == serde_json::to_string(&message.event).expect("whoops") {
                     return Some(message);
                 }
+
+                println!("Dropping mismatched non-CDC event: {:?}", message);
             }
         }
 
