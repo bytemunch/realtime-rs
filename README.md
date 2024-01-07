@@ -17,22 +17,30 @@ You're working on Broadcast. Nearly cracked it but gotta add a way to block unti
    > i had to learn what a `Box<dyn T>` is for this one, it was horrible
  - [x] Heartbeat
    > i <3 threads
-- [x] Disconnecting Channels
 - [x] Middleware
   > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
 - [x] Broadcast
   > Very basic implementation, so far untested across different devices
+- [x] Client states
+- [x] Disconnecting client
+- [x] Gracefully disconnecting Channels
+  > more work and testing needed here
+- [x] Channel states
 
 ### TODOs
 
-- [ ] Disconnecting client
-- [ ] Channel states
-- [ ] Client states
+- [ ] Auto reconnecting client
+  > Break current `connect()` function into `new()` and `connect()`
+- [ ] Client `set_auth` + cascade through channels
 - [ ] Middleware example
 - [ ] Configurable heartbeat interval
+- [ ] Real world use case example
+  > like getting realtime data and doing something in the main loop in response. perhaps an 'updates since connected' counter
+  > will probably need an `mpsc` for moving data out of callback closures
 - [ ] Presence (i don't have the first clue here, research day incoming)
 - [ ] Async client
 - [ ] Lock down a clean API
+- [ ] Docs
 - [ ] Anything else I can find to do before writing tests
 - [ ] Tests
 

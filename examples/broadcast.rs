@@ -46,7 +46,7 @@ fn main() {
         }
 
         if sent_once {
-            //client.disconnect();
+            client.disconnect();
             continue;
         }
 

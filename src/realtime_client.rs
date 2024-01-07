@@ -26,13 +26,21 @@ use uuid::Uuid;
 
 use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
-use crate::realtime_channel::RealtimeChannel;
+use crate::realtime_channel::{ChannelState, RealtimeChannel};
 
+#[derive(PartialEq, Debug)]
 pub enum ConnectionState {
     Connecting,
     Open,
     Closing,
     Closed,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum NextMessageError {
+    WouldBlock,
+    TryRecvError(TryRecvError),
+    NoChannel,
 }
 
 #[derive(Debug)]
@@ -77,6 +85,7 @@ pub struct RealtimeClient {
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
+    status: ConnectionState,
 }
 
 impl Debug for RealtimeClient {
@@ -229,51 +238,55 @@ impl RealtimeClient {
         let _socket_thread = thread::spawn(move || loop {
             // TODO nested way too much for my liking
             //
+
             // get lock
             match loop_socket.lock() {
                 Ok(mut socket) => {
-                    // Send to server
-                    let message = outbound_rx.try_recv();
+                    if socket.can_read() && socket.can_write() {
+                        // Send to server
+                        let message = outbound_rx.try_recv();
 
-                    match message {
-                        Ok(message) => {
-                            println!("[SEND] {:?}", message);
-                            let _ = socket.send(message.into());
-                        }
-                        Err(TryRecvError::Empty) => { // do nothing
-                        }
-                        Err(e) => {
-                            println!("outbound error: {:?}", e);
-                        }
-                    }
-
-                    // Recieve from server
-                    match socket.read() {
-                        Ok(raw_message) => {
-                            let msg = raw_message.to_text().unwrap();
-
-                            let message: RealtimeMessage =
-                                serde_json::from_str(msg).expect("Deserialization error: ");
-
-                            println!("[RECV] {:?}", message);
-
-                            // TODO error handling; match on all msg values
-                            match message.payload {
-                                Payload::Empty {} => {
-                                    println!(
-                                        "Possibly malformed payload: {:?}",
-                                        raw_message.to_text().unwrap()
-                                    )
-                                }
-                                _ => {}
+                        match message {
+                            Ok(message) => {
+                                let raw_message = serde_json::to_string(&message);
+                                println!("[SEND] {:?}", raw_message);
+                                let _ = socket.send(message.into());
                             }
-                            let _ = inbound_tx.send(message);
+                            Err(TryRecvError::Empty) => { // do nothing
+                            }
+                            Err(e) => {
+                                println!("outbound error: {:?}", e);
+                            }
                         }
-                        Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
-                            // do nothing here :)
-                        }
-                        Err(err) => {
-                            println!("Socket read error: {:?}", err);
+
+                        // Recieve from server
+                        match socket.read() {
+                            Ok(raw_message) => {
+                                let msg = raw_message.to_text().unwrap();
+
+                                let message: RealtimeMessage =
+                                    serde_json::from_str(msg).expect("Deserialization error: ");
+
+                                println!("[RECV] {:?}", message);
+
+                                // TODO error handling; match on all msg values
+                                match message.payload {
+                                    Payload::Empty {} => {
+                                        println!(
+                                            "Possibly malformed payload: {:?}",
+                                            raw_message.to_text().unwrap()
+                                        )
+                                    }
+                                    _ => {}
+                                }
+                                let _ = inbound_tx.send(message);
+                            }
+                            Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                                // do nothing here :)
+                            }
+                            Err(err) => {
+                                println!("Socket read error: {:?}", err);
+                            }
                         }
                     }
 
@@ -311,15 +324,27 @@ impl RealtimeClient {
             inbound_channel,
             outbound_tx,
             options: RealtimeClientOptions::default(),
+            status: ConnectionState::Open,
         }
     }
 
     pub fn disconnect(&mut self) {
-        // TODO disconnect all channels
+        // TODO i don't like this circular stuff bouncing between disconnect() and
+        // remove_all_channels()
+        //
+        // might just duplicate the channel remove code
+        self.remove_all_channels();
+
+        if self.status == ConnectionState::Closed {
+            return;
+        }
+
         match self.socket.lock() {
             Ok(mut socket) => {
-                // TODO error handling
                 let _ = socket.close(None);
+                drop(socket);
+                self.status = ConnectionState::Closed;
+                println!("Client disconnected. {:?}", self.status);
             }
             Err(e) => {
                 println!("Disconnect: mutex hard. {:?}", e);
@@ -356,8 +381,74 @@ impl RealtimeClient {
         self.channels.get(&channel_id)
     }
 
-    pub fn drop_channel(&mut self, channel_id: Uuid) -> Option<RealtimeChannel> {
-        self.channels.remove(&channel_id)
+    pub fn get_channels(&self) -> &HashMap<Uuid, RealtimeChannel> {
+        &self.channels
+    }
+
+    pub fn remove_channel(&mut self, channel_id: Uuid) -> Option<RealtimeChannel> {
+        if let Some(mut channel) = self.channels.remove(&channel_id) {
+            let _ = channel.unsubscribe();
+
+            if self.channels.len() == 0 {
+                self.disconnect();
+            }
+
+            return Some(channel);
+        }
+
+        None
+    }
+
+    pub fn remove_all_channels(&mut self) {
+        if self.status == ConnectionState::Closing || self.status == ConnectionState::Closed {
+            return;
+        }
+
+        // wait until inbound_rx is drained
+        loop {
+            let recv = self.next_message();
+
+            if Err(NextMessageError::WouldBlock) == recv {
+                break;
+            }
+        }
+
+        self.status = ConnectionState::Closing;
+
+        loop {
+            let _ = self.next_message();
+
+            let mut all_channels_closed = true;
+
+            for (_id, channel) in &mut self.channels {
+                let channel_state = channel.unsubscribe();
+
+                match channel_state {
+                    Ok(state) => {
+                        if state != ChannelState::Closed {
+                            all_channels_closed = false;
+                        }
+                    }
+                    Err(e) => {
+                        // TODO error handling
+                        println!("Unsubscribe error: {:?}", e);
+                    }
+                }
+            }
+
+            if all_channels_closed {
+                println!("All channels closed!");
+                break;
+            }
+        }
+
+        self.channels.clear();
+
+        self.disconnect(); // No need to stay connected with no channels
+    }
+
+    pub fn set_auth(&mut self, _access_token: String) {
+        // TODO
     }
 
     pub fn add_middleware(
@@ -425,11 +516,4 @@ impl RealtimeClient {
             }
         }
     }
-}
-
-#[derive(Debug)]
-pub enum NextMessageError {
-    WouldBlock,
-    TryRecvError(TryRecvError),
-    NoChannel,
 }

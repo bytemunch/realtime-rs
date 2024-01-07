@@ -8,7 +8,7 @@ use crate::message::payload::{
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
 use crate::realtime_client::RealtimeClient;
 use std::fmt::Debug;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, SendError};
 
 pub type RealtimeCallback = (
     MessageEvent,
@@ -16,7 +16,7 @@ pub type RealtimeCallback = (
     Box<dyn FnMut(&RealtimeMessage)>,
 );
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ChannelState {
     Closed,
     Errored,
@@ -25,9 +25,15 @@ pub enum ChannelState {
     Leaving,
 }
 
+#[derive(Debug)]
+pub enum ChannelSendError {
+    SendError(SendError<RealtimeMessage>),
+    ChannelError(ChannelState),
+}
+
 pub struct RealtimeChannel {
     pub topic: String,
-    pub callbacks: Vec<RealtimeCallback>,
+    pub callbacks: Vec<RealtimeCallback>, // TODO 2d vec [event][callback] for better memory access
     tx: mpsc::Sender<RealtimeMessage>,
     postgres_changes: Vec<PostgresChange>,
     pub status: ChannelState,
@@ -72,8 +78,48 @@ impl RealtimeChannel {
         self.id
     }
 
-    pub fn send(&self, message: RealtimeMessage) -> Result<(), mpsc::SendError<RealtimeMessage>> {
-        self.tx.send(message)
+    pub fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
+        if self.status == ChannelState::Closed || self.status == ChannelState::Leaving {
+            return Ok(self.status);
+        }
+
+        match self.send(RealtimeMessage {
+            event: MessageEvent::Leave,
+            topic: self.topic.clone(),
+            payload: Payload::Empty {},
+            message_ref: Some(format!("{}+leave", self.id)),
+        }) {
+            Ok(()) => {
+                self.status = ChannelState::Leaving;
+                Ok(self.status)
+            }
+            Err(ChannelSendError::ChannelError(status)) => return Ok(status),
+            // TODO too verbose
+            Err(ChannelSendError::SendError(e)) => return Err(ChannelSendError::SendError(e)),
+        }
+    }
+
+    pub fn presence_state(&self) {
+        // TODO
+    }
+
+    pub fn track(&mut self) {
+        // TODO
+    }
+
+    pub fn untrack(&mut self) {
+        // TODO
+    }
+
+    pub fn send(&self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
+        if self.status == ChannelState::Closed || self.status == ChannelState::Leaving {
+            return Err(ChannelSendError::ChannelError(self.status)); // TODO error here
+        }
+
+        match self.tx.send(message) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(ChannelSendError::SendError(e)),
+        }
     }
 
     pub fn on(
@@ -113,11 +159,27 @@ impl RealtimeChannel {
             _ => {}
         }
 
-        for (event, filter, callback) in &mut self.callbacks {
-            // TODO clone clone clone clone clone
-            if let Some(message) = filter.clone().check(message.clone()) {
-                if *event == message.event {
-                    callback(&message);
+        match &message.event {
+            MessageEvent::Close => {
+                self.status = ChannelState::Closed;
+                println!("Channel Closed! {:?}", self.id);
+            }
+            MessageEvent::Reply => {
+                if &message.message_ref.clone().unwrap_or("#NOREF".to_string())
+                    == &format!("{}+leave", self.id)
+                {
+                    self.status = ChannelState::Closed;
+                    println!("Channel Closed! {:?}", self.id);
+                }
+            }
+            _ => {
+                for (event, filter, callback) in &mut self.callbacks {
+                    // TODO clone clone clone clone clone
+                    if let Some(message) = filter.clone().check(message.clone()) {
+                        if *event == message.event {
+                            callback(&message);
+                        }
+                    }
                 }
             }
         }

@@ -29,6 +29,7 @@ pub struct MessageFilter {
 
 impl MessageFilter {
     pub fn check(self, message: RealtimeMessage) -> Option<RealtimeMessage> {
+        // TODO match on message.payload instead for simpler function
         match self.event {
             MessageFilterEvent::PostgresCDC(postgres_event) => {
                 let Payload::PostgresChange(payload) = &message.payload else {
