@@ -30,7 +30,7 @@ You're working on Broadcast. Nearly cracked it but gotta add a way to block unti
 ### TODOs
 
 - [ ] Auto reconnecting client
-  > Break current `connect()` function into `new()` and `connect()`
+  > Dedicated connection monitoring thread?
 - [ ] Client `set_auth` + cascade through channels
 - [ ] Middleware example
 - [ ] Configurable heartbeat interval
