@@ -1,8 +1,11 @@
 #![allow(dead_code)]
-
-use std::fmt::Debug;
+// TODO TODO TODO TODO TODO:
+// Test the auto reconnect bits
+//
+use std::fmt::{Debug, Display};
 use std::sync::MutexGuard;
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 use std::{
     collections::HashMap,
     env, io,
@@ -30,11 +33,13 @@ use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
 use crate::realtime_channel::{ChannelCreateError, ChannelState, RealtimeChannel};
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Default)]
 pub enum ConnectionState {
+    Reconnecting,
     Connecting,
     Open,
     Closing,
+    #[default]
     Closed,
 }
 
@@ -47,6 +52,13 @@ pub enum NextMessageError {
     SocketError(ConnectionError),
 }
 
+impl std::error::Error for NextMessageError {}
+impl Display for NextMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("{:?}", self))
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ConnectionError {
     NoSocket,
@@ -54,6 +66,11 @@ pub enum ConnectionError {
     NoWrite,
     Disconnected,
     MutexError, // TODO return the poisonerror here, lifetime tings
+}
+
+#[derive(Debug, PartialEq)]
+pub enum MonitorSignal {
+    Reconnect,
 }
 
 #[derive(Debug)]
@@ -68,6 +85,7 @@ pub struct RealtimeClientOptions {
     encode: Option<String>,               // placeholder
     decode: Option<String>,               // placeholder
     reconnect_interval: Option<Duration>, // placeholder TODO backoff function
+    reconnect_attempts: usize,
 }
 
 impl Default for RealtimeClientOptions {
@@ -86,15 +104,19 @@ impl Default for RealtimeClientOptions {
             encode: None,
             decode: None,
             reconnect_interval: None,
+            reconnect_attempts: 0,
         }
     }
 }
 
+#[derive(Default)]
 pub struct RealtimeClient {
     pub socket: Arc<Mutex<Option<WebSocket<MaybeTlsStream<TcpStream>>>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
+    // mpsc
     inbound_channel: Option<(Sender<RealtimeMessage>, Receiver<RealtimeMessage>)>,
     pub(crate) outbound_tx: Option<Sender<RealtimeMessage>>,
+    monitor_tx: Option<Sender<MonitorSignal>>,
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
@@ -105,10 +127,14 @@ pub struct RealtimeClient {
     heartbeat_thread: Option<JoinHandle<()>>,
     socket_rw_thread: Option<JoinHandle<()>>,
     monitor_thread: Option<JoinHandle<()>>,
+    reconnect_now: Option<SystemTime>,
+    reconnect_delay: Duration,
+    reconnect_attempts: usize,
 }
 
 impl Debug for RealtimeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO this is horrid
         f.write_fmt(format_args!(
             "{:?} {:?} {:?} {:?} {:?} {}",
             self.socket,
@@ -124,47 +150,36 @@ impl Debug for RealtimeClient {
 impl RealtimeClient {
     pub fn new(url: String, anon_key: String) -> RealtimeClient {
         RealtimeClient {
-            socket: Arc::new(Mutex::new(None)),
-            channels: HashMap::new(),
-            inbound_channel: None,
-            outbound_tx: None,
-            middleware: HashMap::new(),
-            options: RealtimeClientOptions::default(),
-            status: ConnectionState::Closed,
             endpoint: url.parse().unwrap(),
             access_token: anon_key,
-            heartbeat_thread: None,
-            socket_rw_thread: None,
-            monitor_thread: None,
+            ..Default::default()
         }
     }
 
-    pub fn connect(&mut self) -> &mut RealtimeClient {
+    pub fn connect(&mut self) -> Result<&mut RealtimeClient, Box<dyn std::error::Error>> {
         let uri: Uri = format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.access_token
         )
-        .parse()
-        .expect("Malformed URI");
+        .parse()?;
 
-        let mut request = uri.clone().into_client_request().unwrap();
+        let mut request = uri.clone().into_client_request()?;
         let headers = request.headers_mut();
 
-        let auth: HeaderValue = format!("Bearer {}", self.access_token).parse().unwrap();
+        let auth: HeaderValue = format!("Bearer {}", self.access_token).parse()?;
         headers.insert("Authorization", auth);
 
-        let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
+        let xci: HeaderValue = format!("realtime-rs/0.1.0").parse()?;
         headers.insert("X-Client-Info", xci);
 
         println!("Connecting... Req: {:?}\n", request);
 
         let uri = request.uri();
-        let mode = uri_mode(uri).expect("URI mode broke.");
+        let mode = uri_mode(uri)?;
         let host = request
             .uri()
             .host()
-            .ok_or(Error::Url(UrlError::NoHostName))
-            .expect("Malformed URI.");
+            .ok_or(Error::Url(UrlError::NoHostName))?;
 
         let host = if host.starts_with('[') {
             &host[1..host.len() - 1]
@@ -177,11 +192,9 @@ impl RealtimeClient {
             Mode::Tls => 443,
         });
 
-        let addrs = (host, port)
-            .to_socket_addrs()
-            .expect("Couldn't generate addrs");
+        let addrs = (host, port).to_socket_addrs()?;
 
-        fn get_stream(addrs: &[SocketAddr], uri: &Uri) -> Result<TcpStream, ()> {
+        fn get_stream(addrs: &[SocketAddr], uri: &Uri) -> Result<TcpStream, &'static str> {
             for addr in addrs {
                 println!("Trying to contact {} at {}...", uri, addr);
                 if let Ok(stream) = TcpStream::connect(addr) {
@@ -189,17 +202,14 @@ impl RealtimeClient {
                 }
             }
 
-            Err(())
+            Err("Stream no worky")
         }
 
-        let mut stream =
-            get_stream(addrs.as_slice(), uri).expect("Couldn't get stream from addrs.");
+        let mut stream = get_stream(addrs.as_slice(), uri)?;
 
-        NoDelay::set_nodelay(&mut stream, true).expect("Couldn't set NoDelay");
+        NoDelay::set_nodelay(&mut stream, true)?;
 
-        stream
-            .set_nonblocking(true)
-            .expect("Couldn't set stream nonblocking");
+        stream.set_nonblocking(true)?;
 
         // TODO alias these types if they keep coming up
         fn retry_handshake(
@@ -252,12 +262,13 @@ impl RealtimeClient {
             }
         }
 
-        let conn = get_connection(request, stream).expect("Connection failed");
+        self.reconnect_attempts += 1;
+        let conn = get_connection(request, stream)?;
 
         let (socket, res) = conn;
 
         if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-            panic!("101 code not recieved.");
+            return Err("101 code not recieved.".into());
         }
 
         let socket = Arc::new(Mutex::new(Some(socket)));
@@ -270,8 +281,49 @@ impl RealtimeClient {
         println!("Socket ready");
 
         self.status = ConnectionState::Open;
+        self.reconnect_attempts = 0;
 
-        self
+        Ok(self)
+    }
+
+    fn run_monitor(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // monitor thread for async program control
+        // so far only auto reconnect stuff
+        let monitor_channel = mpsc::channel();
+
+        self.monitor_tx = Some(monitor_channel.0);
+
+        let monitor_rx = monitor_channel.1;
+
+        if self.reconnect_now.is_none() {
+            self.reconnect_now = Some(SystemTime::now());
+            self.reconnect_delay = backoff(self.reconnect_attempts);
+        }
+
+        if self.reconnect_now.unwrap() + self.reconnect_delay > SystemTime::now() {
+            return Ok(());
+        }
+
+        // TODO sleep for an amount by default
+        match monitor_rx.try_recv() {
+            Ok(signal) => {
+                println!("{:?}", signal);
+                match signal {
+                    MonitorSignal::Reconnect => {
+                        self.reconnect_now.take();
+                        //
+                        match self.connect() {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(e),
+                        }
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => Err(NextMessageError::WouldBlock.into()),
+            Err(TryRecvError::Disconnected) => {
+                Err(NextMessageError::SocketError(ConnectionError::Disconnected).into())
+            }
+        }
     }
 
     fn start_heartbeat_thread(&mut self) {
@@ -538,11 +590,11 @@ impl RealtimeClient {
     pub fn add_middleware(
         &mut self,
         middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>,
-    ) -> Uuid {
+    ) -> &mut RealtimeClient {
         // TODO user defined middleware ordering
         let uuid = Uuid::new_v4();
         self.middleware.insert(uuid, middleware);
-        uuid
+        self
     }
 
     pub fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {
@@ -552,11 +604,9 @@ impl RealtimeClient {
         message
     }
 
-    pub fn remove_middleware(
-        &mut self,
-        uuid: Uuid,
-    ) -> Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>> {
-        self.middleware.remove(&uuid)
+    pub fn remove_middleware(&mut self, uuid: Uuid) -> &mut RealtimeClient {
+        self.middleware.remove(&uuid);
+        self
     }
 
     fn check_connection(&mut self) -> Result<(), ConnectionError> {
@@ -577,9 +627,18 @@ impl RealtimeClient {
     /// Polls next message from socket. Returns the topic of the channel that has been forwarded
     /// the message, or a TryRecvError. Can return WouldBlock
     pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
-        match self.check_connection() {
-            Ok(_) => {}
-            Err(e) => return Err(NextMessageError::SocketError(e)),
+        let _ = self.run_monitor(); // TODO error handling
+
+        if self.status == ConnectionState::Reconnecting {
+            let reconnect_tx = self.monitor_tx.clone().expect("uhoh no monitor channel");
+            let _ = reconnect_tx.send(MonitorSignal::Reconnect);
+            return Err(NextMessageError::SocketError(ConnectionError::Disconnected));
+        }
+
+        if let Err(e) = self.check_connection() {
+            // TODO start reconnect routine here
+            self.status = ConnectionState::Reconnecting;
+            return Err(NextMessageError::SocketError(e));
         }
 
         let Some(inbound_channel) = &self.inbound_channel else {
@@ -648,4 +707,20 @@ fn check_connection_static<'a>(
     }
 
     Ok(socket_guard)
+}
+
+fn backoff(attempts: usize) -> Duration {
+    let times = vec![
+        Duration::ZERO,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+    ];
+
+    if attempts > times.len() - 1 {
+        Duration::from_secs(10)
+    } else {
+        times[attempts]
+    }
 }

@@ -16,7 +16,7 @@ fn main() {
 
     let mut client = RealtimeClient::new(url, anon_key);
 
-    client.connect();
+    let _ = client.connect();
 
     let channel_a = client
         .channel("room-1".into())
@@ -52,7 +52,7 @@ fn main() {
         }
 
         if sent_once {
-            // client.disconnect();
+            client.disconnect();
             continue;
         }
 

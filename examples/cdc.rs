@@ -15,7 +15,7 @@ fn main() {
 
     let mut client = RealtimeClient::new(url, anon_key);
 
-    client.connect();
+    let _ = client.connect();
 
     client
         .channel("channel_1".to_string())
@@ -41,7 +41,7 @@ fn main() {
             }
             Err(NextMessageError::WouldBlock) => {}
             Err(e) => {
-                println!("NextMessageError: {:?}", e)
+                //println!("NextMessageError: {:?}", e)
             }
         }
     }

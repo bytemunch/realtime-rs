@@ -7,22 +7,18 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 ### Working so far
 
  - [x] Websocket client
-   > soon to have such use as `RealtimeClient::connect(endpoint)`, currently uses ENV vars, messy and hacky but was quick to implement 
  - [x] Channels
-   >`realtime-js` has much more involved channels than i do, i wonder if i'm missing something. i mean more than is obviously missing
  - [x] Granular Callbacks (`INSERT`, `UPDATE`, `DELETE` and `ALL` (`*`))
-   > i had to learn what a `Box<dyn T>` is for this one, it was horrible
  - [x] Heartbeat
-   > i <3 threads
-- [x] Middleware
-  > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
-- [x] Broadcast
-  > Very basic implementation, so far untested across different devices
-- [x] Client states
-- [x] Disconnecting client
-- [x] Gracefully disconnecting Channels
-  > more work and testing needed here
-- [x] Channel states
+ - [x] Middleware
+   > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
+ - [x] Broadcast
+   > Very basic implementation, so far untested across different devices
+ - [x] Client states
+ - [x] Disconnecting client
+ - [x] Gracefully disconnecting Channels
+   > more work and testing needed here
+ - [x] Channel states
 
 ### TODOs
 
