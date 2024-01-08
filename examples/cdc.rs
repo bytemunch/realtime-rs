@@ -13,10 +13,13 @@ fn main() {
     let url = "ws://127.0.0.1:54321".into();
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut client = RealtimeClient::connect(url, anon_key);
+    let mut client = RealtimeClient::new(url, anon_key);
+
+    client.connect();
 
     client
         .channel("channel_1".to_string())
+        .expect("")
         .on(
             MessageEvent::PostgresChanges,
             MessageFilter {

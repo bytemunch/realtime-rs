@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
-use crate::realtime_channel::{ChannelState, RealtimeChannel};
+use crate::realtime_channel::{ChannelCreateError, ChannelState, RealtimeChannel};
 
 #[derive(PartialEq, Debug)]
 pub enum ConnectionState {
@@ -41,6 +41,7 @@ pub enum NextMessageError {
     WouldBlock,
     TryRecvError(TryRecvError),
     NoChannel,
+    ChannelClosed,
 }
 
 #[derive(Debug)]
@@ -78,14 +79,16 @@ impl Default for RealtimeClientOptions {
 }
 
 pub struct RealtimeClient {
-    pub socket: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
+    pub socket: Option<Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
-    inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
-    pub(crate) outbound_tx: Sender<RealtimeMessage>,
+    inbound_channel: Option<(Sender<RealtimeMessage>, Receiver<RealtimeMessage>)>,
+    pub(crate) outbound_tx: Option<Sender<RealtimeMessage>>,
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
     status: ConnectionState,
+    endpoint: String,
+    access_token: String,
 }
 
 impl Debug for RealtimeClient {
@@ -103,10 +106,24 @@ impl Debug for RealtimeClient {
 }
 
 impl RealtimeClient {
-    pub fn connect(url: String, anon_key: String) -> RealtimeClient {
+    pub fn new(url: String, anon_key: String) -> RealtimeClient {
+        RealtimeClient {
+            socket: None,
+            channels: HashMap::new(),
+            inbound_channel: None,
+            outbound_tx: None,
+            middleware: HashMap::new(),
+            options: RealtimeClientOptions::default(),
+            status: ConnectionState::Closed,
+            endpoint: url.parse().unwrap(),
+            access_token: anon_key,
+        }
+    }
+
+    pub fn connect(&mut self) -> &mut RealtimeClient {
         let uri: Uri = format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-            url, anon_key
+            self.endpoint, self.access_token
         )
         .parse()
         .expect("Malformed URI");
@@ -114,7 +131,7 @@ impl RealtimeClient {
         let mut request = uri.clone().into_client_request().unwrap();
         let headers = request.headers_mut();
 
-        let auth: HeaderValue = format!("Bearer {}", anon_key).parse().unwrap();
+        let auth: HeaderValue = format!("Bearer {}", self.access_token).parse().unwrap();
         headers.insert("Authorization", auth);
 
         let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
@@ -183,6 +200,7 @@ impl RealtimeClient {
                     match e {
                         HandshakeError::Interrupted(mid_hs) => {
                             // recurse TODO is this a good idea? look into rust recursion
+                            // TODO sleep for a bit here?
                             return retry_handshake(mid_hs);
                         }
                         HandshakeError::Failure(err) => {
@@ -317,15 +335,12 @@ impl RealtimeClient {
 
         println!("Socket ready");
 
-        RealtimeClient {
-            socket,
-            channels: HashMap::new(),
-            middleware: HashMap::new(),
-            inbound_channel,
-            outbound_tx,
-            options: RealtimeClientOptions::default(),
-            status: ConnectionState::Open,
-        }
+        self.socket = Some(socket);
+        self.inbound_channel = Some(inbound_channel);
+        self.outbound_tx = Some(outbound_tx);
+        self.status = ConnectionState::Open;
+
+        self
     }
 
     pub fn disconnect(&mut self) {
@@ -339,7 +354,11 @@ impl RealtimeClient {
             return;
         }
 
-        match self.socket.lock() {
+        let Some(socket) = &self.socket else {
+            return;
+        };
+
+        match socket.lock() {
             Ok(mut socket) => {
                 let _ = socket.close(None);
                 drop(socket);
@@ -353,7 +372,11 @@ impl RealtimeClient {
     }
 
     pub fn send(&mut self, msg: RealtimeMessage) {
-        match self.socket.lock() {
+        let Some(socket) = &self.socket else {
+            return;
+        };
+
+        match socket.lock() {
             Ok(mut socket) => {
                 println!("Sending: {:?}", msg);
                 let _ = socket.send(msg.into());
@@ -365,16 +388,21 @@ impl RealtimeClient {
         };
     }
 
-    pub fn channel(&mut self, topic: String) -> &mut RealtimeChannel {
+    pub fn channel(&mut self, topic: String) -> Result<&mut RealtimeChannel, ChannelCreateError> {
         let topic = format!("realtime:{}", topic);
 
         let new_channel = RealtimeChannel::new(self, topic.clone());
 
-        let id = new_channel.id.clone();
+        match new_channel {
+            Ok(channel) => {
+                let id = channel.id.clone();
 
-        self.channels.insert(id, new_channel);
+                self.channels.insert(id, channel);
 
-        self.channels.get_mut(&id).unwrap()
+                Ok(self.channels.get_mut(&id).unwrap())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_channel(&self, channel_id: Uuid) -> Option<&RealtimeChannel> {
@@ -479,7 +507,12 @@ impl RealtimeClient {
     /// the message, or a TryRecvError. Can return WouldBlock
     pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         // TODO check connection state here
-        let message = self.inbound_channel.1.try_recv();
+        //
+        let Some(inbound_channel) = &self.inbound_channel else {
+            return Err(NextMessageError::ChannelClosed);
+        };
+
+        let message = inbound_channel.1.try_recv();
 
         match message {
             Ok(mut message) => {
@@ -506,7 +539,12 @@ impl RealtimeClient {
 
     /// Blocking listener loop, use if all business logic is in callbacks
     pub fn listen(&mut self) {
-        for message in &self.inbound_channel.1 {
+        let Some(inbound_channel) = &self.inbound_channel else {
+            // TODO error handling
+            return;
+        };
+
+        for message in &inbound_channel.1 {
             // TODO filter system messages and the like
             // Send message to channel
             for (_id, channel) in &mut self.channels {

@@ -31,6 +31,11 @@ pub enum ChannelSendError {
     ChannelError(ChannelState),
 }
 
+#[derive(Debug)]
+pub enum ChannelCreateError {
+    ClientNotReady,
+}
+
 pub struct RealtimeChannel {
     pub topic: String,
     pub callbacks: Vec<RealtimeCallback>, // TODO 2d vec [event][callback] for better memory access
@@ -41,17 +46,25 @@ pub struct RealtimeChannel {
 }
 
 impl RealtimeChannel {
-    pub(crate) fn new(client: &mut RealtimeClient, topic: String) -> RealtimeChannel {
+    pub(crate) fn new(
+        client: &mut RealtimeClient,
+        topic: String,
+    ) -> Result<RealtimeChannel, ChannelCreateError> {
         let id = uuid::Uuid::new_v4();
 
-        RealtimeChannel {
+        let Some(tx) = &client.outbound_tx else {
+            println!("Client not ready.");
+            return Err(ChannelCreateError::ClientNotReady);
+        };
+
+        Ok(RealtimeChannel {
             topic,
             callbacks: vec![],
-            tx: client.outbound_tx.clone(),
+            tx: tx.clone(),
             postgres_changes: vec![],
             status: ChannelState::Closed,
             id,
-        }
+        })
     }
 
     pub fn subscribe(&mut self) -> Uuid {

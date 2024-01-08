@@ -14,10 +14,13 @@ fn main() {
     let url = "ws://127.0.0.1:54321".into();
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut client = RealtimeClient::connect(url, anon_key);
+    let mut client = RealtimeClient::new(url, anon_key);
+
+    client.connect();
 
     let channel_a = client
         .channel("room-1".into())
+        .expect("Channel broke: ")
         .on(
             MessageEvent::Broadcast,
             MessageFilter {
@@ -30,7 +33,10 @@ fn main() {
         )
         .subscribe();
 
-    let channel_b = client.channel("room-1".into()).subscribe();
+    let channel_b = client
+        .channel("room-1".into())
+        .expect("Channel broke")
+        .subscribe();
 
     let mut sent_once = false;
 
@@ -46,7 +52,7 @@ fn main() {
         }
 
         if sent_once {
-            client.disconnect();
+            // client.disconnect();
             continue;
         }
 
