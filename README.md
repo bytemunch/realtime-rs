@@ -4,9 +4,6 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ## Progress
 
-# HI TOMORROW SAM
-You're working on Broadcast. Nearly cracked it but gotta add a way to block until subscribe is done, think is always desired when working sync.
-
 ### Working so far
 
  - [x] Websocket client
@@ -39,6 +36,7 @@ You're working on Broadcast. Nearly cracked it but gotta add a way to block unti
   > will probably need an `mpsc` for moving data out of callback closures
 - [ ] Presence (i don't have the first clue here, research day incoming)
 - [ ] Async client
+- [ ] Single threaded client (+ test perf against multi threaded, might not need threads?)
 - [ ] Lock down a clean API
 - [ ] Docs
 - [ ] Anything else I can find to do before writing tests
