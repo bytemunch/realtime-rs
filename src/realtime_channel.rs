@@ -52,15 +52,10 @@ impl RealtimeChannel {
     ) -> Result<RealtimeChannel, ChannelCreateError> {
         let id = uuid::Uuid::new_v4();
 
-        let Some(tx) = &client.outbound_tx else {
-            println!("Client not ready.");
-            return Err(ChannelCreateError::ClientNotReady);
-        };
-
         Ok(RealtimeChannel {
             topic,
             callbacks: vec![],
-            tx: tx.clone(),
+            tx: client.outbound_channel.0.clone(),
             postgres_changes: vec![],
             status: ChannelState::Closed,
             id,
@@ -199,7 +194,6 @@ impl RealtimeChannel {
     }
 }
 
-// Shut up compiler i dont know what im doing here okay
 impl Debug for RealtimeChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(

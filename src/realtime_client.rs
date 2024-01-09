@@ -3,18 +3,12 @@
 // Test the auto reconnect bits
 //
 use std::fmt::{Debug, Display};
-use std::sync::MutexGuard;
-use std::thread::JoinHandle;
 use std::time::SystemTime;
 use std::{
     collections::HashMap,
     env, io,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
-    sync::{
-        mpsc::{self, Receiver, Sender, TryRecvError},
-        Arc, Mutex,
-    },
-    thread::{self, sleep},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::Duration,
 };
 
@@ -65,7 +59,6 @@ pub enum ConnectionError {
     NoRead,
     NoWrite,
     Disconnected,
-    MutexError, // TODO return the poisonerror here, lifetime tings
 }
 
 #[derive(Debug, PartialEq)]
@@ -85,7 +78,7 @@ pub struct RealtimeClientOptions {
     encode: Option<String>,               // placeholder
     decode: Option<String>,               // placeholder
     reconnect_interval: Option<Duration>, // placeholder TODO backoff function
-    reconnect_attempts: usize,
+    reconnect_delay: Duration,
 }
 
 impl Default for RealtimeClientOptions {
@@ -104,32 +97,48 @@ impl Default for RealtimeClientOptions {
             encode: None,
             decode: None,
             reconnect_interval: None,
-            reconnect_attempts: 0,
+            reconnect_delay: Duration::ZERO,
         }
     }
 }
 
-#[derive(Default)]
 pub struct RealtimeClient {
-    pub socket: Arc<Mutex<Option<WebSocket<MaybeTlsStream<TcpStream>>>>>,
+    pub socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
     // mpsc
-    inbound_channel: Option<(Sender<RealtimeMessage>, Receiver<RealtimeMessage>)>,
-    pub(crate) outbound_tx: Option<Sender<RealtimeMessage>>,
-    monitor_tx: Option<Sender<MonitorSignal>>,
+    inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    pub(crate) outbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
+    monitor_channel: (Sender<MonitorSignal>, Receiver<MonitorSignal>),
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     /// Options to be used in internal fns
     options: RealtimeClientOptions,
     status: ConnectionState,
     endpoint: String,
     access_token: String,
-    // threads
-    heartbeat_thread: Option<JoinHandle<()>>,
-    socket_rw_thread: Option<JoinHandle<()>>,
-    monitor_thread: Option<JoinHandle<()>>,
+    // timers
     reconnect_now: Option<SystemTime>,
-    reconnect_delay: Duration,
     reconnect_attempts: usize,
+    heartbeat_now: Option<SystemTime>,
+}
+
+impl Default for RealtimeClient {
+    fn default() -> Self {
+        Self {
+            socket: Default::default(),
+            channels: Default::default(),
+            inbound_channel: mpsc::channel(),
+            outbound_channel: mpsc::channel(),
+            monitor_channel: mpsc::channel(),
+            middleware: Default::default(),
+            options: Default::default(),
+            status: Default::default(),
+            endpoint: Default::default(),
+            access_token: Default::default(),
+            reconnect_now: Default::default(),
+            reconnect_attempts: Default::default(),
+            heartbeat_now: Default::default(),
+        }
+    }
 }
 
 impl Debug for RealtimeClient {
@@ -140,7 +149,7 @@ impl Debug for RealtimeClient {
             self.socket,
             self.channels,
             self.inbound_channel,
-            self.outbound_tx,
+            self.outbound_channel,
             self.options,
             "TODO middleware debug fmt"
         ))
@@ -152,6 +161,9 @@ impl RealtimeClient {
         RealtimeClient {
             endpoint: url.parse().unwrap(),
             access_token: anon_key,
+            inbound_channel: mpsc::channel(),
+            outbound_channel: mpsc::channel(),
+            monitor_channel: mpsc::channel(),
             ..Default::default()
         }
     }
@@ -271,12 +283,9 @@ impl RealtimeClient {
             return Err("101 code not recieved.".into());
         }
 
-        let socket = Arc::new(Mutex::new(Some(socket)));
-        self.socket = socket;
+        self.socket = Some(socket);
 
-        self.start_socket_rw_thread();
-
-        self.start_heartbeat_thread();
+        let _ = self.run_monitor();
 
         println!("Socket ready");
 
@@ -287,30 +296,23 @@ impl RealtimeClient {
     }
 
     fn run_monitor(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // monitor thread for async program control
-        // so far only auto reconnect stuff
-        let monitor_channel = mpsc::channel();
-
-        self.monitor_tx = Some(monitor_channel.0);
-
-        let monitor_rx = monitor_channel.1;
-
         if self.reconnect_now.is_none() {
             self.reconnect_now = Some(SystemTime::now());
-            self.reconnect_delay = backoff(self.reconnect_attempts);
+            self.options.reconnect_delay = backoff(self.reconnect_attempts);
         }
 
-        if self.reconnect_now.unwrap() + self.reconnect_delay > SystemTime::now() {
+        if self.reconnect_now.unwrap() + self.options.reconnect_delay > SystemTime::now() {
             return Ok(());
         }
 
-        // TODO sleep for an amount by default
-        match monitor_rx.try_recv() {
+        match self.monitor_channel.1.try_recv() {
             Ok(signal) => {
                 println!("{:?}", signal);
                 match signal {
                     MonitorSignal::Reconnect => {
+                        self.status = ConnectionState::Reconnecting;
                         self.reconnect_now.take();
+                        println!("\nReconnect triggered!\n");
                         //
                         match self.connect() {
                             Ok(_) => Ok(()),
@@ -326,127 +328,94 @@ impl RealtimeClient {
         }
     }
 
-    fn start_heartbeat_thread(&mut self) {
-        let heartbeat_socket = self.socket.clone();
+    fn run_heartbeat(&mut self) {
+        if self.heartbeat_now.is_none() {
+            self.heartbeat_now = Some(SystemTime::now());
+        }
 
-        let heartbeat_interval = self.options.heartbeat_interval;
+        if self.heartbeat_now.unwrap() + self.options.heartbeat_interval > SystemTime::now() {
+            return;
+        }
 
-        self.heartbeat_thread = Some(thread::spawn(move || loop {
-            // sleep thread
-            sleep(heartbeat_interval);
+        self.heartbeat_now.take();
 
-            match heartbeat_socket.lock() {
-                Ok(socket_guard) => {
-                    let Ok(mut socket_guard) = check_connection_static(socket_guard) else {
-                        continue;
-                    };
-
-                    let Some(ref mut socket) = *socket_guard else {
-                        continue;
-                    };
-
-                    let _ = socket.send(RealtimeMessage::heartbeat().into());
-
-                    drop(socket_guard);
-                }
-                Err(err) => {
-                    println!("Heartbeat thread: mutex hard. {:?}", err);
-                }
-            };
-        }));
+        self.send(RealtimeMessage::heartbeat());
     }
 
-    fn start_socket_rw_thread(&mut self) {
-        let outbound_channel = mpsc::channel::<RealtimeMessage>();
-        let outbound_tx = outbound_channel.0;
-        let outbound_rx = outbound_channel.1;
+    fn read_socket(&mut self) -> Result<(), ()> {
+        let Some(ref mut socket) = self.socket else {
+            return Err(());
+        };
 
-        let inbound_channel = mpsc::channel::<RealtimeMessage>();
+        if !socket.can_read() {
+            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+            return Err(());
+        }
 
-        let inbound_tx = inbound_channel.0.clone();
+        match socket.read() {
+            Ok(raw_message) => {
+                let msg = raw_message.to_text().unwrap();
 
-        let loop_socket = self.socket.clone();
+                let message: RealtimeMessage =
+                    serde_json::from_str(msg).expect("Deserialization error: ");
 
-        self.socket_rw_thread = Some(thread::spawn(move || loop {
-            // TODO nested way too much for my liking
-            match loop_socket.lock() {
-                Ok(socket_guard) => {
-                    let Ok(mut socket_guard) = check_connection_static(socket_guard) else {
-                        continue;
-                    };
+                println!("[RECV] {:?}", message);
 
-                    let Some(ref mut socket) = *socket_guard else {
-                        continue;
-                    };
-                    // Send to server
-                    let message = outbound_rx.try_recv();
-
-                    match message {
-                        Ok(message) => {
-                            let raw_message = serde_json::to_string(&message);
-                            println!("[SEND] {:?}", raw_message);
-                            let _ = socket.send(message.into());
-                        }
-                        Err(TryRecvError::Empty) => { // do nothing
-                        }
-                        Err(e) => {
-                            println!("outbound error: {:?}", e);
-                        }
+                // TODO error handling; match on all msg values
+                match message.payload {
+                    Payload::Empty {} => {
+                        println!(
+                            "Possibly malformed payload: {:?}",
+                            raw_message.to_text().unwrap()
+                        )
                     }
-
-                    // Recieve from server
-                    match socket.read() {
-                        Ok(raw_message) => {
-                            let msg = raw_message.to_text().unwrap();
-
-                            let message: RealtimeMessage =
-                                serde_json::from_str(msg).expect("Deserialization error: ");
-
-                            println!("[RECV] {:?}", message);
-
-                            // TODO error handling; match on all msg values
-                            match message.payload {
-                                Payload::Empty {} => {
-                                    println!(
-                                        "Possibly malformed payload: {:?}",
-                                        raw_message.to_text().unwrap()
-                                    )
-                                }
-                                _ => {}
-                            }
-                            let _ = inbound_tx.send(message);
-                        }
-                        Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
-                            // do nothing here :)
-                        }
-                        Err(err) => {
-                            println!("Socket read error: {:?}", err);
-                        }
-                    }
-
-                    drop(socket_guard);
+                    _ => {}
                 }
-                Err(err) => {
-                    println!("Socket thread: mutex hard. {:?}", err);
-                }
+                let _ = self.inbound_channel.0.send(message);
+                Ok(())
             }
-        }));
-
-        self.inbound_channel = Some(inbound_channel);
-        self.outbound_tx = Some(outbound_tx);
+            Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                // do nothing here :)
+                Ok(())
+            }
+            Err(err) => {
+                println!("Socket read error: {:?}", err);
+                let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+                Err(())
+            }
+        }
     }
 
-    fn kill_all_threads(&mut self) {
-        if let Some(thread) = self.heartbeat_thread.take() {
-            let _ = thread.join();
+    fn write_socket(&mut self) -> Result<(), ()> {
+        let Some(ref mut socket) = self.socket else {
+            return Err(());
+        };
+
+        if !socket.can_write() {
+            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+            return Err(());
         }
 
-        if let Some(thread) = self.socket_rw_thread.take() {
-            let _ = thread.join();
-        }
+        // Send to server
+        // TODO should drain outbound_channel
+        let message = self.outbound_channel.1.try_recv();
 
-        if let Some(thread) = self.monitor_thread.take() {
-            let _ = thread.join();
+        match message {
+            Ok(message) => {
+                let raw_message = serde_json::to_string(&message);
+                println!("[SEND] {:?}", raw_message);
+                let _ = socket.send(message.into());
+                Ok(())
+            }
+            Err(TryRecvError::Empty) => {
+                // do nothing
+                Ok(())
+            }
+            Err(e) => {
+                println!("outbound error: {:?}", e);
+                let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+                Err(())
+            }
         }
     }
 
@@ -458,42 +427,22 @@ impl RealtimeClient {
         self.remove_all_channels();
 
         if self.status == ConnectionState::Closed {
-            self.kill_all_threads();
             return;
         }
 
-        match self.socket.lock() {
-            Ok(mut socket_guard) => {
-                let Some(ref mut socket) = *socket_guard else {
-                    self.status = ConnectionState::Closed;
-                    println!("Already disconnected. {:?}", self.status);
-                    return;
-                };
-                let _ = socket.close(None);
-                drop(socket_guard);
-                self.status = ConnectionState::Closed;
-                println!("Client disconnected. {:?}", self.status);
-            }
-            Err(e) => {
-                println!("Disconnect: mutex hard. {:?}", e);
-            }
-        }
+        let Some(ref mut socket) = self.socket else {
+            self.status = ConnectionState::Closed;
+            println!("Already disconnected. {:?}", self.status);
+            return;
+        };
+
+        let _ = socket.close(None);
+        self.status = ConnectionState::Closed;
+        println!("Client disconnected. {:?}", self.status);
     }
 
     pub fn send(&mut self, msg: RealtimeMessage) {
-        match self.socket.lock() {
-            Ok(mut socket_guard) => {
-                let Some(ref mut socket) = *socket_guard else {
-                    return;
-                };
-                println!("Sending: {:?}", msg);
-                let _ = socket.send(msg.into());
-                drop(socket_guard);
-            }
-            Err(err) => {
-                println!("Send: mutex hard. {:?}", err);
-            }
-        };
+        let _ = self.outbound_channel.0.send(msg);
     }
 
     pub fn channel(&mut self, topic: String) -> Result<&mut RealtimeChannel, ChannelCreateError> {
@@ -609,48 +558,25 @@ impl RealtimeClient {
         self
     }
 
-    fn check_connection(&mut self) -> Result<(), ConnectionError> {
-        let Ok(socket) = self.socket.lock() else {
-            // TODO reconnect
-            return Err(ConnectionError::MutexError);
-        };
-
-        match check_connection_static(socket) {
-            Ok(socket) => {
-                drop(socket);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Polls next message from socket. Returns the topic of the channel that has been forwarded
+    /// Polls next message from socket. Returns the ids of the channels that has been forwarded
     /// the message, or a TryRecvError. Can return WouldBlock
     pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         let _ = self.run_monitor(); // TODO error handling
+        self.run_heartbeat();
+        let _ = self.read_socket();
+        let _ = self.write_socket();
 
         if self.status == ConnectionState::Reconnecting {
-            let reconnect_tx = self.monitor_tx.clone().expect("uhoh no monitor channel");
-            let _ = reconnect_tx.send(MonitorSignal::Reconnect);
+            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
             return Err(NextMessageError::SocketError(ConnectionError::Disconnected));
         }
 
-        if let Err(e) = self.check_connection() {
-            // TODO start reconnect routine here
-            self.status = ConnectionState::Reconnecting;
-            return Err(NextMessageError::SocketError(e));
-        }
-
-        let Some(inbound_channel) = &self.inbound_channel else {
-            return Err(NextMessageError::ChannelClosed);
-        };
-
-        let message = inbound_channel.1.try_recv();
+        let message = self.inbound_channel.1.try_recv();
 
         match message {
             Ok(mut message) => {
                 let mut ids = vec![];
-                // TODO filter system messages and the like
+                // TODO filter & route system messages and the like
 
                 // Run middleware
                 message = self.run_middleware(message);
@@ -669,44 +595,6 @@ impl RealtimeClient {
             Err(e) => Err(NextMessageError::TryRecvError(e)),
         }
     }
-
-    /// Blocking listener loop, use if all business logic is in callbacks
-    pub fn listen(&mut self) {
-        let Some(inbound_channel) = &self.inbound_channel else {
-            // TODO error handling
-            return;
-        };
-
-        for message in &inbound_channel.1 {
-            // TODO filter system messages and the like
-            // Send message to channel
-            for (_id, channel) in &mut self.channels {
-                if channel.topic == message.topic {
-                    channel.recieve(message.clone());
-                }
-            }
-        }
-    }
-}
-
-fn check_connection_static<'a>(
-    socket_guard: MutexGuard<'a, Option<WebSocket<MaybeTlsStream<TcpStream>>>>,
-) -> Result<MutexGuard<'a, Option<WebSocket<MaybeTlsStream<TcpStream>>>>, ConnectionError> {
-    let Some(ref inner_socket) = *socket_guard else {
-        return Err(ConnectionError::NoSocket);
-    };
-
-    if !inner_socket.can_read() {
-        drop(socket_guard);
-        return Err(ConnectionError::NoRead);
-    }
-
-    if !inner_socket.can_write() {
-        drop(socket_guard);
-        return Err(ConnectionError::NoWrite);
-    }
-
-    Ok(socket_guard)
 }
 
 fn backoff(attempts: usize) -> Duration {

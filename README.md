@@ -19,24 +19,23 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Gracefully disconnecting Channels
    > more work and testing needed here
  - [x] Channel states
+ - [x] Single threaded client
 
 ### TODOs
 
-- [ ] Auto reconnecting client
-  > Dedicated connection monitoring thread?
-- [ ] Client `set_auth` + cascade through channels
-- [ ] Middleware example
-- [ ] Configurable heartbeat interval
-- [ ] Real world use case example
-  > like getting realtime data and doing something in the main loop in response. perhaps an 'updates since connected' counter
-  > will probably need an `mpsc` for moving data out of callback closures
-- [ ] Presence (i don't have the first clue here, research day incoming)
-- [ ] Async client
-- [ ] Single threaded client (+ test perf against multi threaded, might not need threads?)
-- [ ] Lock down a clean API
-- [ ] Docs
-- [ ] Anything else I can find to do before writing tests
-- [ ] Tests
+ - [ ] Auto reconnecting client
+ - [ ] Client `set_auth` + cascade through channels
+ - [ ] Middleware example
+ - [ ] Configurable heartbeat interval
+ - [ ] Real world use case example
+   > like getting realtime data and doing something in the main loop in response. perhaps an 'updates since connected' counter
+   > will probably need an `mpsc` for moving data out of callback closures
+ - [ ] Presence (i don't have the first clue here, research day incoming)
+ - [ ] Async client
+ - [ ] Lock down a clean API
+ - [ ] Docs
+ - [ ] Anything else I can find to do before writing tests
+ - [ ] Tests
 
 # Contributing
 
