@@ -6,7 +6,7 @@ use crate::message::payload::{
     PostgresChange,
 };
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
-use crate::realtime_client::RealtimeClient;
+use crate::sync::realtime_client::RealtimeClient;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
 

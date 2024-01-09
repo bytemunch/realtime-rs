@@ -6,7 +6,7 @@ use realtime_rs::{
         payload::PostgresEvent,
         realtime_message::MessageEvent,
     },
-    realtime_client::{NextMessageError, RealtimeClient},
+    sync::realtime_client::{NextMessageError, RealtimeClient},
 };
 
 fn main() {

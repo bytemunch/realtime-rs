@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
-use crate::realtime_channel::{ChannelCreateError, ChannelState, RealtimeChannel};
+use crate::sync::realtime_channel::{ChannelCreateError, ChannelState, RealtimeChannel};
 
 #[derive(PartialEq, Debug, Default)]
 pub enum ConnectionState {

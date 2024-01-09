@@ -6,8 +6,10 @@ use realtime_rs::{
         payload::{BroadcastPayload, Payload},
         realtime_message::{MessageEvent, RealtimeMessage},
     },
-    realtime_channel::ChannelState,
-    realtime_client::{NextMessageError, RealtimeClient},
+    sync::{
+        realtime_channel::ChannelState,
+        realtime_client::{NextMessageError, RealtimeClient},
+    },
 };
 
 fn main() {
