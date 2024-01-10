@@ -20,10 +20,12 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
    > more work and testing needed here
  - [x] Channel states
  - [x] Single threaded client
+ - [x] Auto reconnect
 
 ### TODOs
 
- - [ ] Auto reconnecting client
+ - [ ] Configurable reconnect max attempts
+ - [ ] Better client state management
  - [ ] Client `set_auth` + cascade through channels
  - [ ] Middleware example
  - [ ] Configurable heartbeat interval

@@ -15,7 +15,10 @@ fn main() {
 
     let mut client = RealtimeClient::new(url, anon_key);
 
-    let _ = client.connect();
+    let client = match client.connect() {
+        Ok(client) => client,
+        Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
+    };
 
     client
         .channel("channel_1".to_string())
@@ -40,7 +43,7 @@ fn main() {
                 println!("Message forwarded to {:?}", topic)
             }
             Err(NextMessageError::WouldBlock) => {}
-            Err(e) => {
+            Err(_e) => {
                 //println!("NextMessageError: {:?}", e)
             }
         }

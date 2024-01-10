@@ -49,7 +49,7 @@ fn main() {
             }
             Err(NextMessageError::WouldBlock) => {}
             Err(e) => {
-                println!("NextMessageError: {:?}", e)
+                //println!("NextMessageError: {:?}", e)
             }
         }
 
