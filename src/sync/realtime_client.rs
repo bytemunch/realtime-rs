@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::SystemTime;
 use std::{
     collections::HashMap,
-    env, io,
+    io,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::Duration,
@@ -48,6 +48,7 @@ pub enum NextMessageError {
     ChannelClosed,
     ClientClosed,
     SocketError(ConnectionError),
+    MonitorError(MonitorError),
 }
 
 impl std::error::Error for NextMessageError {}
@@ -55,6 +56,14 @@ impl Display for NextMessageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!("{:?}", self))
     }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum MonitorError {
+    ReconnectError,
+    MaxReconnects,
+    WouldBlock,
+    Disconnected,
 }
 
 #[derive(Debug, PartialEq)]
@@ -71,16 +80,15 @@ pub enum MonitorSignal {
 }
 
 pub struct RealtimeClientOptions {
-    pub access_token: Option<String>,
-    pub endpoint: String,
     pub headers: Option<HeaderMap>,
     pub params: Option<HashMap<String, String>>,
     pub timeout: Duration, // TODO placeholder
     pub heartbeat_interval: Duration,
     pub client_ref: Option<String>,
-    encode: Option<String>,                                 // placeholder
-    decode: Option<String>,                                 // placeholder
+    pub encode: Option<String>,                             // placeholder
+    pub decode: Option<String>,                             // placeholder
     pub reconnect_interval: Box<dyn Fn(usize) -> Duration>, // impl debug euuurgh there's got to be a better way
+    pub reconnect_max_attempts: usize,
 }
 
 impl Debug for RealtimeClientOptions {
@@ -95,8 +103,6 @@ impl Default for RealtimeClientOptions {
         headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
 
         Self {
-            access_token: Some(env::var("ANON_KEY").unwrap()),
-            endpoint: "ws://127.0.0.1:3012".to_string(),
             headers: Some(headers),
             params: None,
             timeout: Duration::from_secs(10),
@@ -105,6 +111,7 @@ impl Default for RealtimeClientOptions {
             encode: None,
             decode: None,
             reconnect_interval: Box::new(backoff),
+            reconnect_max_attempts: usize::MAX,
         }
     }
 }
@@ -112,7 +119,7 @@ impl Default for RealtimeClientOptions {
 pub struct RealtimeClient {
     pub socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
-    status: ConnectionState,
+    pub status: ConnectionState,
     endpoint: String,
     access_token: String,
     // mpsc
@@ -177,7 +184,13 @@ impl RealtimeClient {
         }
     }
 
+    pub fn set_options(&mut self, options: RealtimeClientOptions) -> &mut RealtimeClient {
+        self.options = options;
+        self
+    }
+
     pub fn connect(&mut self) -> Result<&mut RealtimeClient, Box<dyn std::error::Error>> {
+        // TODO error enum for this fn
         let uri: Uri = format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.access_token
@@ -308,7 +321,7 @@ impl RealtimeClient {
         Ok(self)
     }
 
-    fn run_monitor(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_monitor(&mut self) -> Result<(), MonitorError> {
         if self.reconnect_now.is_none() {
             self.reconnect_now = Some(SystemTime::now());
 
@@ -320,13 +333,17 @@ impl RealtimeClient {
             Ok(signal) => match signal {
                 MonitorSignal::Reconnect => {
                     if self.status == ConnectionState::Open {
-                        return Ok(());
+                        return Ok(()); // TODO wouldblock
                     }
 
                     if self.status == ConnectionState::Reconnecting
                         || SystemTime::now() < self.reconnect_now.unwrap() + self.reconnect_delay
                     {
-                        return Ok(());
+                        return Ok(()); // TODO wouldblock
+                    }
+
+                    if self.reconnect_attempts >= self.options.reconnect_max_attempts {
+                        return Err(MonitorError::MaxReconnects);
                     }
 
                     self.status = ConnectionState::Reconnecting;
@@ -344,15 +361,13 @@ impl RealtimeClient {
                         Err(e) => {
                             println!("reconnect error: {:?}", e);
                             self.status = ConnectionState::Reconnect;
-                            Err(e)
+                            Err(MonitorError::ReconnectError)
                         }
                     }
                 }
             },
-            Err(TryRecvError::Empty) => Err(NextMessageError::WouldBlock.into()),
-            Err(TryRecvError::Disconnected) => {
-                Err(NextMessageError::SocketError(ConnectionError::Disconnected).into())
-            }
+            Err(TryRecvError::Empty) => Err(MonitorError::WouldBlock),
+            Err(TryRecvError::Disconnected) => Err(MonitorError::Disconnected),
         }
     }
 
@@ -523,6 +538,8 @@ impl RealtimeClient {
             return;
         }
 
+        self.status = ConnectionState::Closing;
+
         // wait until inbound_rx is drained
         loop {
             let recv = self.next_message();
@@ -531,8 +548,6 @@ impl RealtimeClient {
                 break;
             }
         }
-
-        self.status = ConnectionState::Closing;
 
         loop {
             let _ = self.next_message();
@@ -562,8 +577,6 @@ impl RealtimeClient {
         }
 
         self.channels.clear();
-
-        self.disconnect(); // No need to stay connected with no channels
     }
 
     pub fn set_auth(&mut self, _access_token: String) {
@@ -598,7 +611,20 @@ impl RealtimeClient {
         if self.status == ConnectionState::Closed {
             return Err(NextMessageError::ClientClosed);
         }
-        let _ = self.run_monitor();
+
+        match self.run_monitor() {
+            Ok(_) => {}
+            Err(MonitorError::WouldBlock) => {}
+            Err(MonitorError::MaxReconnects) => {
+                // TODO ummmmm like kill the reconnect attempts now
+                self.disconnect();
+                return Err(NextMessageError::MonitorError(MonitorError::MaxReconnects));
+            }
+            Err(e) => {
+                return Err(NextMessageError::MonitorError(e));
+            }
+        }
+
         self.run_heartbeat();
         let _ = self.read_socket();
         let _ = self.write_socket();

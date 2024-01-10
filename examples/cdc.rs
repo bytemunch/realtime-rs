@@ -6,7 +6,7 @@ use realtime_rs::{
         payload::PostgresEvent,
         realtime_message::MessageEvent,
     },
-    sync::realtime_client::{NextMessageError, RealtimeClient},
+    sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
 };
 
 fn main() {
@@ -38,6 +38,10 @@ fn main() {
     println!("Client created: {:?}", client);
 
     loop {
+        if client.status == ConnectionState::Closed {
+            break;
+        }
+
         match client.next_message() {
             Ok(topic) => {
                 println!("Message forwarded to {:?}", topic)
@@ -48,4 +52,6 @@ fn main() {
             }
         }
     }
+
+    println!("Client closed.");
 }
