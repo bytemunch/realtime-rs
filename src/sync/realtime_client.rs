@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use std::{
     collections::HashMap,
     io,
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    net::{TcpStream, ToSocketAddrs},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::Duration,
 };
@@ -89,6 +89,7 @@ pub struct RealtimeClientOptions {
     pub decode: Option<String>,                             // placeholder
     pub reconnect_interval: Box<dyn Fn(usize) -> Duration>, // impl debug euuurgh there's got to be a better way
     pub reconnect_max_attempts: usize,
+    pub connection_timeout: Duration,
 }
 
 impl Debug for RealtimeClientOptions {
@@ -112,6 +113,7 @@ impl Default for RealtimeClientOptions {
             decode: None,
             reconnect_interval: Box::new(backoff),
             reconnect_max_attempts: usize::MAX,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -215,97 +217,76 @@ impl RealtimeClient {
             .host()
             .ok_or(Error::Url(UrlError::NoHostName))?;
 
-        let host = if host.starts_with('[') {
-            &host[1..host.len() - 1]
-        } else {
-            host
-        };
-
         let port = uri.port_u16().unwrap_or(match mode {
             Mode::Plain => 80,
             Mode::Tls => 443,
         });
 
-        let addrs = (host, port).to_socket_addrs()?;
+        let mut addrs = (host, port).to_socket_addrs()?;
 
-        fn get_stream(addrs: &[SocketAddr], uri: &Uri) -> Result<TcpStream, &'static str> {
-            for addr in addrs {
-                println!("Trying to contact {} at {}...", uri, addr);
-                if let Ok(stream) = TcpStream::connect(addr) {
-                    return Ok(stream);
-                }
+        let mut stream = match TcpStream::connect_timeout(
+            &addrs.next().expect("uhoh no addr"),
+            self.options.connection_timeout,
+        ) {
+            Ok(stream) => {
+                self.reconnect_attempts = 0;
+                stream
             }
-
-            Err("Stream no worky")
-        }
-
-        let mut stream = match get_stream(addrs.as_slice(), uri) {
-            Ok(stream) => stream,
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                    self.reconnect_attempts += 1;
+                    let backoff = self.options.reconnect_interval.as_ref();
+                    sleep(backoff(self.reconnect_attempts));
+                    return self.connect();
+                }
+                return Err(e.into());
+            }
         };
 
         NoDelay::set_nodelay(&mut stream, true)?;
 
         stream.set_nonblocking(true)?;
 
-        // TODO alias these types if they keep coming up
-        fn retry_handshake(
-            mid_hs: MidHandshake<ClientHandshake<MaybeTlsStream<TcpStream>>>,
-            attempts: usize,
-            reconnect_fn: &Box<dyn Fn(usize) -> Duration>,
-        ) -> Result<
-            (
-                WebSocket<MaybeTlsStream<TcpStream>>,
-                tungstenite::http::Response<Option<Vec<u8>>>,
-            ),
-            Error,
-        > {
-            match mid_hs.handshake() {
-                Ok(stream) => {
-                    return Ok(stream);
-                }
-                Err(e) => match e {
-                    HandshakeError::Interrupted(mid_hs) => {
-                        // TODO sleeping main thread bad
-                        sleep(reconnect_fn(attempts));
-
-                        return retry_handshake(mid_hs, attempts + 1, reconnect_fn);
-                    }
-                    HandshakeError::Failure(err) => {
-                        return Err(err);
-                    }
-                },
-            }
-        }
-
-        fn get_connection<R>(
-            request: R,
-            stream: TcpStream,
-            backoff_fn: &Box<dyn Fn(usize) -> Duration>,
-        ) -> Result<
+        let conn: Result<
             (
                 WebSocket<MaybeTlsStream<TcpStream>>,
                 Response<Option<Vec<u8>>>,
             ),
             Error,
-        >
-        where
-            R: IntoClientRequest,
-        {
-            match client_tls(request, stream) {
-                Ok(stream) => Ok(stream),
-                Err(err) => match err {
-                    HandshakeError::Failure(err) => Err(err),
-                    HandshakeError::Interrupted(mid_hs) => {
-                        return retry_handshake(mid_hs, 0, backoff_fn)
+        > = match client_tls(request, stream) {
+            Ok(stream) => {
+                self.reconnect_attempts = 0;
+                Ok(stream)
+            }
+            Err(err) => match err {
+                HandshakeError::Failure(err) => {
+                    // TODO DRY break reconnect attempts code into own fn
+                    if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                        self.reconnect_attempts += 1;
+                        let backoff = self.options.reconnect_interval.as_ref();
+                        sleep(backoff(self.reconnect_attempts));
+                        return self.connect();
+                    }
+
+                    return Err(err.into());
+                }
+                HandshakeError::Interrupted(mid_hs) => match self.retry_handshake(mid_hs) {
+                    Ok(stream) => Ok(stream),
+                    Err(err) => {
+                        if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                            self.reconnect_attempts += 1;
+                            let backoff = self.options.reconnect_interval.as_ref();
+                            sleep(backoff(self.reconnect_attempts));
+                            return self.connect();
+                        }
+
+                        return Err(err.into());
                     }
                 },
-            }
-        }
+            },
+        };
 
-        let conn = get_connection(request, stream, &self.options.reconnect_interval)?;
-
-        let (socket, res) = conn;
+        let (socket, res) = conn.expect("Handshake fail");
 
         if res.status() != StatusCode::SWITCHING_PROTOCOLS {
             return Err("101 code not recieved.".into());
@@ -316,9 +297,41 @@ impl RealtimeClient {
         println!("Socket ready");
 
         self.status = ConnectionState::Open;
-        self.reconnect_attempts = 0;
 
         Ok(self)
+    }
+
+    fn retry_handshake(
+        &mut self,
+        mid_hs: MidHandshake<ClientHandshake<MaybeTlsStream<TcpStream>>>,
+    ) -> Result<
+        (
+            WebSocket<MaybeTlsStream<TcpStream>>,
+            tungstenite::http::Response<Option<Vec<u8>>>,
+        ),
+        Error,
+    > {
+        match mid_hs.handshake() {
+            Ok(stream) => {
+                return Ok(stream);
+            }
+            Err(e) => match e {
+                HandshakeError::Interrupted(mid_hs) => {
+                    // TODO sleeping main thread bad
+                    if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                        self.reconnect_attempts += 1;
+                        let backoff = self.options.reconnect_interval.as_ref();
+                        sleep(backoff(self.reconnect_attempts));
+                        return self.retry_handshake(mid_hs);
+                    }
+
+                    return Err(Error::AttackAttempt); // TODO placeholder, fix error types
+                }
+                HandshakeError::Failure(err) => {
+                    return Err(err);
+                }
+            },
+        }
     }
 
     fn run_monitor(&mut self) -> Result<(), MonitorError> {
@@ -391,7 +404,8 @@ impl RealtimeClient {
         };
 
         if !socket.can_read() {
-            self.status = ConnectionState::Reconnect;
+            self.status = ConnectionState::Reconnect; // TODO do not mutate state here, return error
+
             let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
             return Err(());
         }
@@ -399,6 +413,7 @@ impl RealtimeClient {
         match socket.read() {
             Ok(raw_message) => match raw_message {
                 Message::Text(string_message) => {
+                    // TODO recoverable error
                     let message: RealtimeMessage =
                         serde_json::from_str(&string_message).expect("Deserialization error: ");
 
@@ -439,6 +454,7 @@ impl RealtimeClient {
         };
 
         if !socket.can_write() {
+            // TODO do not mutate state here
             self.status = ConnectionState::Reconnect;
             let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
             return Err(());
@@ -469,15 +485,11 @@ impl RealtimeClient {
     }
 
     pub fn disconnect(&mut self) {
-        // TODO i don't like this circular stuff bouncing between disconnect() and
-        // remove_all_channels()
-        //
-        // might just duplicate the channel remove code
-        self.remove_all_channels();
-
         if self.status == ConnectionState::Closed {
             return;
         }
+
+        self.remove_all_channels();
 
         let Some(ref mut socket) = self.socket else {
             self.status = ConnectionState::Closed;
@@ -616,7 +628,6 @@ impl RealtimeClient {
             Ok(_) => {}
             Err(MonitorError::WouldBlock) => {}
             Err(MonitorError::MaxReconnects) => {
-                // TODO ummmmm like kill the reconnect attempts now
                 self.disconnect();
                 return Err(NextMessageError::MonitorError(MonitorError::MaxReconnects));
             }

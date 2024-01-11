@@ -22,10 +22,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Single threaded client
  - [x] Auto reconnect
  - [x] Configurable reconnect max attempts
+ - [x] Connection timeout + retry
 
 ### TODOs
 
- - [ ] Connection timeout + retry
  - [ ] Better client state management
  - [ ] Client `set_auth` + cascade through channels
  - [ ] Middleware example
