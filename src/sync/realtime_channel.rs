@@ -2,8 +2,7 @@ use uuid::Uuid;
 
 use crate::message::message_filter::{MessageFilter, MessageFilterEvent};
 use crate::message::payload::{
-    JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, Payload, PayloadStatus,
-    PostgresChange,
+    AccessTokenPayload, JoinPayload, Payload, PayloadStatus, PostgresChange,
 };
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
 use crate::sync::realtime_client::RealtimeClient;
@@ -40,9 +39,9 @@ pub struct RealtimeChannel {
     pub topic: String,
     pub callbacks: Vec<RealtimeCallback>, // TODO 2d vec [event][callback] for better memory access
     tx: mpsc::Sender<RealtimeMessage>,
-    postgres_changes: Vec<PostgresChange>,
     pub status: ChannelState,
     pub id: Uuid,
+    join_payload: JoinPayload,
 }
 
 impl RealtimeChannel {
@@ -52,12 +51,17 @@ impl RealtimeChannel {
     ) -> Result<RealtimeChannel, ChannelCreateError> {
         let id = uuid::Uuid::new_v4();
 
+        let access_token = client.access_token.clone();
+
         Ok(RealtimeChannel {
             topic,
             callbacks: vec![],
             tx: client.outbound_channel.0.clone(),
-            postgres_changes: vec![],
             status: ChannelState::Closed,
+            join_payload: JoinPayload {
+                access_token: Some(access_token),
+                ..Default::default()
+            },
             id,
         })
     }
@@ -66,18 +70,7 @@ impl RealtimeChannel {
         let join_message = RealtimeMessage {
             event: MessageEvent::Join,
             topic: self.topic.clone(),
-            payload: Payload::Join(JoinPayload {
-                config: JoinConfig {
-                    presence: JoinConfigPresence {
-                        key: "test_key".to_owned(),
-                    },
-                    broadcast: JoinConfigBroadcast {
-                        broadcast_self: true,
-                        ack: false,
-                    },
-                    postgres_changes: self.postgres_changes.clone(),
-                },
-            }),
+            payload: Payload::Join(self.join_payload.clone()),
             message_ref: Some(self.id.into()),
         };
 
@@ -107,6 +100,23 @@ impl RealtimeChannel {
         }
     }
 
+    pub fn set_auth(&mut self, access_token: String) -> Result<(), ChannelSendError> {
+        self.join_payload.access_token = Some(access_token.clone());
+
+        if self.status != ChannelState::Joined {
+            return Ok(());
+        }
+
+        let access_token_message = RealtimeMessage {
+            event: MessageEvent::AccessToken,
+            topic: self.topic.clone(),
+            payload: Payload::AccessToken(AccessTokenPayload { access_token }),
+            ..Default::default()
+        };
+
+        self.send(access_token_message)
+    }
+
     pub fn presence_state(&self) {
         // TODO
     }
@@ -121,7 +131,7 @@ impl RealtimeChannel {
 
     pub fn send(&self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
         if self.status == ChannelState::Closed || self.status == ChannelState::Leaving {
-            return Err(ChannelSendError::ChannelError(self.status)); // TODO error here
+            return Err(ChannelSendError::ChannelError(self.status));
         }
 
         match self.tx.send(message) {
@@ -136,16 +146,16 @@ impl RealtimeChannel {
         filter: MessageFilter,
         callback: impl FnMut(&RealtimeMessage) + 'static,
     ) -> &mut Self {
-        // modify self.postgres_changes with callback requirements
-
         if let MessageFilterEvent::PostgresCDC(cdc_event) = filter.event.clone() {
-            self.postgres_changes.push(PostgresChange {
-                event: cdc_event,
-                schema: filter.schema.clone(),
-                table: filter.table.clone().unwrap_or("".into()),
-                // TODO filter filter filter, you know the filter filter, in the filter. dot clone.
-                filter: filter.filter.clone(),
-            });
+            self.join_payload
+                .config
+                .postgres_changes
+                .push(PostgresChange {
+                    event: cdc_event,
+                    schema: filter.schema.clone(),
+                    table: filter.table.clone().unwrap_or("".into()),
+                    filter: filter.filter.clone(),
+                });
         }
 
         self.callbacks.push((event, filter, Box::new(callback)));
@@ -182,7 +192,6 @@ impl RealtimeChannel {
             }
             _ => {
                 for (event, filter, callback) in &mut self.callbacks {
-                    // TODO clone clone clone clone clone
                     if let Some(message) = filter.clone().check(message.clone()) {
                         if *event == message.event {
                             callback(&message);

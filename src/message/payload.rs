@@ -80,7 +80,7 @@ struct PostgresOldDataRef {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AccessTokenPayload {
-    access_token: String,
+    pub access_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -91,26 +91,28 @@ pub struct SystemPayload {
     status: PayloadStatus,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinPayload {
     pub config: JoinConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfig {
     pub broadcast: JoinConfigBroadcast,
     pub presence: JoinConfigPresence,
     pub postgres_changes: Vec<PostgresChange>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfigBroadcast {
     #[serde(rename = "self")]
     pub(crate) broadcast_self: bool,
     pub(crate) ack: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfigPresence {
     pub key: String,
 }

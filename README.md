@@ -23,17 +23,18 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Auto reconnect
  - [x] Configurable reconnect max attempts
  - [x] Connection timeout + retry
+ - [x] Client `set_auth` + cascade through channels
+   > Untested cos no GoTrue, or supabase Auth, or whatever it's calling itself nowadays. May look into remedying this lack of auth once realtime is done
 
 ### TODOs
 
- - [ ] Better client state management
- - [ ] Client `set_auth` + cascade through channels
  - [ ] Middleware example
  - [ ] Real world use case example
    > like getting realtime data and doing something in the main loop in response. perhaps an 'updates since connected' counter
    > will probably need an `mpsc` for moving data out of callback closures
  - [ ] Presence (i don't have the first clue here, research day incoming)
  - [ ] Refactor all the stupid out
+    > - [ ] Better client state management
  - [ ] Lock down a clean API
  - [ ] Docs
  - [ ] Anything else I can find to do before writing tests

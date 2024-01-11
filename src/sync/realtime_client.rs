@@ -97,7 +97,6 @@ pub enum MonitorSignal {
 pub struct RealtimeClientOptions {
     pub headers: Option<HeaderMap>,
     pub params: Option<HashMap<String, String>>,
-    pub timeout: Duration, // TODO placeholder
     pub heartbeat_interval: Duration,
     pub client_ref: Option<String>,
     pub encode: Option<String>,                             // placeholder
@@ -121,7 +120,6 @@ impl Default for RealtimeClientOptions {
         Self {
             headers: Some(headers),
             params: None,
-            timeout: Duration::from_secs(10),
             heartbeat_interval: Duration::from_secs(29),
             client_ref: Default::default(),
             encode: None,
@@ -138,7 +136,7 @@ pub struct RealtimeClient {
     channels: HashMap<Uuid, RealtimeChannel>,
     pub status: ConnectionState,
     endpoint: String,
-    access_token: String,
+    pub access_token: String,
     // mpsc
     inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
     pub(crate) outbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
@@ -437,9 +435,6 @@ impl RealtimeClient {
         };
 
         if !socket.can_read() {
-            self.status = ConnectionState::Reconnect; // TODO do not mutate state here, return error
-
-            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
             return Err(SocketError::NoRead);
         }
 
@@ -482,16 +477,13 @@ impl RealtimeClient {
         }
     }
 
-    fn write_socket(&mut self) -> Result<(), ()> {
+    fn write_socket(&mut self) -> Result<(), SocketError> {
         let Some(ref mut socket) = self.socket else {
-            return Err(());
+            return Err(SocketError::NoSocket);
         };
 
         if !socket.can_write() {
-            // TODO do not mutate state here
-            self.status = ConnectionState::Reconnect;
-            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-            return Err(());
+            return Err(SocketError::NoWrite);
         }
 
         // Send to server
@@ -513,9 +505,14 @@ impl RealtimeClient {
                 println!("outbound error: {:?}", e);
                 self.status = ConnectionState::Reconnect;
                 let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-                Err(())
+                Err(SocketError::WouldBlock)
             }
         }
+    }
+
+    fn reconnect(&mut self) {
+        self.status = ConnectionState::Reconnect;
+        let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
     }
 
     pub fn disconnect(&mut self) {
@@ -525,14 +522,14 @@ impl RealtimeClient {
 
         self.remove_all_channels();
 
+        self.status = ConnectionState::Closed;
+
         let Some(ref mut socket) = self.socket else {
-            self.status = ConnectionState::Closed;
             println!("Already disconnected. {:?}", self.status);
             return;
         };
 
         let _ = socket.close(None);
-        self.status = ConnectionState::Closed;
         println!("Client disconnected. {:?}", self.status);
     }
 
@@ -625,8 +622,13 @@ impl RealtimeClient {
         self.channels.clear();
     }
 
-    pub fn set_auth(&mut self, _access_token: String) {
-        // TODO
+    pub fn set_auth(&mut self, access_token: String) {
+        println!("TODO, untested, need to get an auth token to test with somehow. Might just whip up a quick and dirty auth helper for now.");
+        self.access_token = access_token.clone();
+
+        for (_id, channel) in &mut self.channels {
+            let _ = channel.set_auth(access_token.clone()); // TODO error handling
+        }
     }
 
     pub fn add_middleware(
@@ -651,11 +653,19 @@ impl RealtimeClient {
         self
     }
 
-    /// Polls next message from socket. Returns the ids of the channels that has been forwarded
-    /// the message, or a TryRecvError. Can return WouldBlock
     pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         if self.status == ConnectionState::Closed {
             return Err(NextMessageError::ClientClosed);
+        }
+
+        if self.status == ConnectionState::Reconnect {
+            self.status = ConnectionState::Reconnect;
+            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+            return Err(NextMessageError::SocketError(SocketError::Disconnected));
+        }
+
+        if self.status == ConnectionState::Reconnecting {
+            return Err(NextMessageError::WouldBlock);
         }
 
         match self.run_monitor() {
@@ -671,13 +681,21 @@ impl RealtimeClient {
         }
 
         self.run_heartbeat();
-        let _ = self.read_socket(); // TODO error handling
-        let _ = self.write_socket();
 
-        if self.status == ConnectionState::Reconnect {
-            self.status = ConnectionState::Reconnect;
-            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-            return Err(NextMessageError::SocketError(SocketError::Disconnected));
+        match self.write_socket() {
+            Ok(()) => {}
+            Err(e) => {
+                self.reconnect();
+                return Err(NextMessageError::SocketError(e));
+            }
+        }
+
+        match self.read_socket() {
+            Ok(()) => {}
+            Err(e) => {
+                self.reconnect();
+                return Err(NextMessageError::SocketError(e));
+            }
         }
 
         let message = self.inbound_channel.1.try_recv();
