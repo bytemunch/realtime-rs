@@ -15,7 +15,6 @@ use tungstenite::Message;
 use tungstenite::{
     client::{uri_mode, IntoClientRequest},
     client_tls,
-    error::UrlError,
     handshake::MidHandshake,
     http::{HeaderMap, HeaderValue, Response, StatusCode, Uri},
     stream::{MaybeTlsStream, Mode, NoDelay},
@@ -47,7 +46,7 @@ pub enum NextMessageError {
     NoChannel,
     ChannelClosed,
     ClientClosed,
-    SocketError(ConnectionError),
+    SocketError(SocketError),
     MonitorError(MonitorError),
 }
 
@@ -67,11 +66,27 @@ pub enum MonitorError {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum ConnectionError {
+pub enum SocketError {
     NoSocket,
     NoRead,
     NoWrite,
     Disconnected,
+    WouldBlock,
+    TooManyRetries,
+    HandshakeError,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ConnectError {
+    BadUri,
+    BadHost,
+    BadAddrs,
+    StreamError,
+    NoDelayError,
+    NonblockingError,
+    HandshakeError,
+    MaxRetries,
+    WrongProtocol,
 }
 
 #[derive(Debug, PartialEq)]
@@ -191,38 +206,52 @@ impl RealtimeClient {
         self
     }
 
-    pub fn connect(&mut self) -> Result<&mut RealtimeClient, Box<dyn std::error::Error>> {
-        // TODO error enum for this fn
-        let uri: Uri = format!(
+    pub fn connect(&mut self) -> Result<&mut RealtimeClient, ConnectError> {
+        let uri: Uri = match format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.access_token
         )
-        .parse()?;
+        .parse()
+        {
+            Ok(uri) => uri,
+            Err(_e) => return Err(ConnectError::BadUri),
+        };
 
-        let mut request = uri.clone().into_client_request()?;
+        let Ok(mut request) = uri.clone().into_client_request() else {
+            return Err(ConnectError::BadUri);
+        };
+
         let headers = request.headers_mut();
 
-        let auth: HeaderValue = format!("Bearer {}", self.access_token).parse()?;
+        let auth: HeaderValue = format!("Bearer {}", self.access_token)
+            .parse()
+            .expect("malformed access token?");
         headers.insert("Authorization", auth);
 
-        let xci: HeaderValue = format!("realtime-rs/0.1.0").parse()?;
+        // unwrap: shouldn't fail
+        let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
         headers.insert("X-Client-Info", xci);
 
         println!("Connecting... Req: {:?}\n", request);
 
         let uri = request.uri();
-        let mode = uri_mode(uri)?;
-        let host = request
-            .uri()
-            .host()
-            .ok_or(Error::Url(UrlError::NoHostName))?;
+
+        let Ok(mode) = uri_mode(uri) else {
+            return Err(ConnectError::BadUri);
+        };
+
+        let Some(host) = request.uri().host() else {
+            return Err(ConnectError::BadHost);
+        };
 
         let port = uri.port_u16().unwrap_or(match mode {
             Mode::Plain => 80,
             Mode::Tls => 443,
         });
 
-        let mut addrs = (host, port).to_socket_addrs()?;
+        let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+            return Err(ConnectError::BadAddrs);
+        };
 
         let mut stream = match TcpStream::connect_timeout(
             &addrs.next().expect("uhoh no addr"),
@@ -232,20 +261,25 @@ impl RealtimeClient {
                 self.reconnect_attempts = 0;
                 stream
             }
-            Err(e) => {
+            Err(_e) => {
                 if self.reconnect_attempts < self.options.reconnect_max_attempts {
                     self.reconnect_attempts += 1;
                     let backoff = self.options.reconnect_interval.as_ref();
                     sleep(backoff(self.reconnect_attempts));
                     return self.connect();
                 }
-                return Err(e.into());
+                // TODO get reason from stream error
+                return Err(ConnectError::StreamError);
             }
         };
 
-        NoDelay::set_nodelay(&mut stream, true)?;
+        let Ok(()) = NoDelay::set_nodelay(&mut stream, true) else {
+            return Err(ConnectError::NoDelayError);
+        };
 
-        stream.set_nonblocking(true)?;
+        let Ok(()) = stream.set_nonblocking(true) else {
+            return Err(ConnectError::NonblockingError);
+        };
 
         let conn: Result<
             (
@@ -259,7 +293,7 @@ impl RealtimeClient {
                 Ok(stream)
             }
             Err(err) => match err {
-                HandshakeError::Failure(err) => {
+                HandshakeError::Failure(_err) => {
                     // TODO DRY break reconnect attempts code into own fn
                     if self.reconnect_attempts < self.options.reconnect_max_attempts {
                         self.reconnect_attempts += 1;
@@ -268,11 +302,11 @@ impl RealtimeClient {
                         return self.connect();
                     }
 
-                    return Err(err.into());
+                    return Err(ConnectError::HandshakeError);
                 }
                 HandshakeError::Interrupted(mid_hs) => match self.retry_handshake(mid_hs) {
                     Ok(stream) => Ok(stream),
-                    Err(err) => {
+                    Err(_err) => {
                         if self.reconnect_attempts < self.options.reconnect_max_attempts {
                             self.reconnect_attempts += 1;
                             let backoff = self.options.reconnect_interval.as_ref();
@@ -280,7 +314,8 @@ impl RealtimeClient {
                             return self.connect();
                         }
 
-                        return Err(err.into());
+                        // TODO err data
+                        return Err(ConnectError::MaxRetries);
                     }
                 },
             },
@@ -289,7 +324,7 @@ impl RealtimeClient {
         let (socket, res) = conn.expect("Handshake fail");
 
         if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-            return Err("101 code not recieved.".into());
+            return Err(ConnectError::WrongProtocol);
         }
 
         self.socket = Some(socket);
@@ -309,7 +344,7 @@ impl RealtimeClient {
             WebSocket<MaybeTlsStream<TcpStream>>,
             tungstenite::http::Response<Option<Vec<u8>>>,
         ),
-        Error,
+        SocketError,
     > {
         match mid_hs.handshake() {
             Ok(stream) => {
@@ -325,10 +360,11 @@ impl RealtimeClient {
                         return self.retry_handshake(mid_hs);
                     }
 
-                    return Err(Error::AttackAttempt); // TODO placeholder, fix error types
+                    return Err(SocketError::TooManyRetries); // TODO placeholder, fix error types
                 }
-                HandshakeError::Failure(err) => {
-                    return Err(err);
+                HandshakeError::Failure(_err) => {
+                    // TODO pass error data
+                    return Err(SocketError::HandshakeError);
                 }
             },
         }
@@ -345,14 +381,11 @@ impl RealtimeClient {
         match self.monitor_channel.1.try_recv() {
             Ok(signal) => match signal {
                 MonitorSignal::Reconnect => {
-                    if self.status == ConnectionState::Open {
-                        return Ok(()); // TODO wouldblock
-                    }
-
-                    if self.status == ConnectionState::Reconnecting
+                    if self.status == ConnectionState::Open
+                        || self.status == ConnectionState::Reconnecting
                         || SystemTime::now() < self.reconnect_now.unwrap() + self.reconnect_delay
                     {
-                        return Ok(()); // TODO wouldblock
+                        return Err(MonitorError::WouldBlock);
                     }
 
                     if self.reconnect_attempts >= self.options.reconnect_max_attempts {
@@ -395,19 +428,19 @@ impl RealtimeClient {
 
         self.heartbeat_now.take();
 
-        self.send(RealtimeMessage::heartbeat());
+        let _ = self.send(RealtimeMessage::heartbeat());
     }
 
-    fn read_socket(&mut self) -> Result<(), ()> {
+    fn read_socket(&mut self) -> Result<(), SocketError> {
         let Some(ref mut socket) = self.socket else {
-            return Err(());
+            return Err(SocketError::NoSocket);
         };
 
         if !socket.can_read() {
             self.status = ConnectionState::Reconnect; // TODO do not mutate state here, return error
 
             let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-            return Err(());
+            return Err(SocketError::NoRead);
         }
 
         match socket.read() {
@@ -428,11 +461,12 @@ impl RealtimeClient {
                 }
                 Message::Close(_close_message) => {
                     // TODO disconnect
-                    Err(())
+                    self.disconnect();
+                    Err(SocketError::Disconnected)
                 }
                 _ => {
                     // do nothing on ping, pong, binary messages
-                    Ok(())
+                    Err(SocketError::WouldBlock)
                 }
             },
             Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -443,7 +477,7 @@ impl RealtimeClient {
                 println!("Socket read error: {:?}", err);
                 self.status = ConnectionState::Reconnect;
                 let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-                Err(())
+                Err(SocketError::WouldBlock)
             }
         }
     }
@@ -502,8 +536,8 @@ impl RealtimeClient {
         println!("Client disconnected. {:?}", self.status);
     }
 
-    pub fn send(&mut self, msg: RealtimeMessage) {
-        let _ = self.outbound_channel.0.send(msg);
+    pub fn send(&mut self, msg: RealtimeMessage) -> Result<(), mpsc::SendError<RealtimeMessage>> {
+        self.outbound_channel.0.send(msg)
     }
 
     pub fn channel(&mut self, topic: String) -> Result<&mut RealtimeChannel, ChannelCreateError> {
@@ -637,13 +671,13 @@ impl RealtimeClient {
         }
 
         self.run_heartbeat();
-        let _ = self.read_socket();
+        let _ = self.read_socket(); // TODO error handling
         let _ = self.write_socket();
 
         if self.status == ConnectionState::Reconnect {
             self.status = ConnectionState::Reconnect;
             let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
-            return Err(NextMessageError::SocketError(ConnectionError::Disconnected));
+            return Err(NextMessageError::SocketError(SocketError::Disconnected));
         }
 
         let message = self.inbound_channel.1.try_recv();
