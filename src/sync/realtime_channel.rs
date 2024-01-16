@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::message::cdc_message_filter::CdcMessageFilter;
 use crate::message::payload::{
     AccessTokenPayload, JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, Payload,
-    PayloadStatus, PostgresChange, PostgresChangesEvent,
+    PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
 };
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
 use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, SendError};
 
 use super::realtime_presence::{PresenceEvent, PresenceState};
 
-pub type RealtimeCallback = (CdcMessageFilter, Box<dyn FnMut(&RealtimeMessage)>);
+pub type CdcCallback = (CdcMessageFilter, Box<dyn FnMut(&PostgresChangesPayload)>);
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ChannelState {
@@ -38,7 +38,7 @@ pub enum ChannelCreateError {
 
 pub struct RealtimeChannel {
     pub topic: String,
-    cdc_callbacks: HashMap<PostgresChangesEvent, Vec<RealtimeCallback>>,
+    cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
     broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&HashMap<String, Value>)>>>,
     tx: mpsc::Sender<RealtimeMessage>,
     pub status: ChannelState,
@@ -214,7 +214,7 @@ impl RealtimeChannel {
         &mut self,
         event: PostgresChangesEvent,
         filter: CdcMessageFilter,
-        callback: impl FnMut(&RealtimeMessage) + 'static,
+        callback: impl FnMut(&PostgresChangesPayload) + 'static,
     ) -> &mut Self {
         self.join_payload
             .config
@@ -269,8 +269,10 @@ impl RealtimeChannel {
                 for cdc_callback in self.cdc_callbacks.get_mut(&event).unwrap_or(&mut vec![]) {
                     let ref filter = cdc_callback.0;
 
-                    if let Some(message) = filter.check(message.clone()) {
-                        cdc_callback.1(&message);
+                    // TODO REFAC pointless message clones when not using result; filter.check
+                    // should borrow and return bool/result
+                    if let Some(_message) = filter.check(message.clone()) {
+                        cdc_callback.1(&payload);
                     }
                 }
 
@@ -281,8 +283,8 @@ impl RealtimeChannel {
                 {
                     let ref filter = cdc_callback.0;
 
-                    if let Some(message) = filter.check(message.clone()) {
-                        cdc_callback.1(&message);
+                    if let Some(_message) = filter.check(message.clone()) {
+                        cdc_callback.1(&payload);
                     }
                 }
             }
