@@ -26,7 +26,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Client `set_auth` + cascade through channels
    > Untested cos no GoTrue, or supabase Auth, or whatever it's calling itself nowadays. May look into remedying this lack of auth once realtime is done
  - [x] Presence
- 
+
 ### TODOs
 
  - [ ] Middleware example

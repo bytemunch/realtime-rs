@@ -66,6 +66,16 @@ pub struct BroadcastPayload {
     pub broadcast_type: String, // TODO this is always 'broadcast', impl custom serde ;_;
 }
 
+impl BroadcastPayload {
+    pub fn new(event: String, payload: HashMap<String, Value>) -> Self {
+        BroadcastPayload {
+            event,
+            payload,
+            broadcast_type: "broadcast".into(),
+        }
+    }
+}
+
 impl Default for BroadcastPayload {
     fn default() -> Self {
         BroadcastPayload {

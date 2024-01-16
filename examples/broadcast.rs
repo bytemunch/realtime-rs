@@ -1,10 +1,7 @@
 use std::{collections::HashMap, env};
 
 use realtime_rs::{
-    message::{
-        payload::{BroadcastPayload, Payload},
-        realtime_message::{MessageEvent, RealtimeMessage},
-    },
+    message::realtime_message::RealtimeMessage,
     sync::{
         realtime_channel::ChannelState,
         realtime_client::{NextMessageError, RealtimeClient},
@@ -58,19 +55,10 @@ fn main() {
 
             payload.insert("message".into(), "hello, broadcast!".into());
 
-            let _ = client
-                .get_channel(channel_b)
-                .unwrap() // TODO inject topic in channel.send
-                .send(RealtimeMessage {
-                    event: MessageEvent::Broadcast,
-                    topic: "realtime:room-1".into(),
-                    payload: Payload::Broadcast(BroadcastPayload {
-                        event: "banana".into(),
-                        payload,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
+            let message = RealtimeMessage::broadcast("banana".into(), payload);
+
+            let _ = client.get_channel(channel_b).unwrap().send(message);
+
             sent_once = true;
         }
     }

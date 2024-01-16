@@ -39,7 +39,7 @@ pub enum ChannelCreateError {
 pub struct RealtimeChannel {
     pub topic: String,
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<RealtimeCallback>>,
-    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&RealtimeMessage)>>>,
+    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&HashMap<String, Value>)>>>,
     tx: mpsc::Sender<RealtimeMessage>,
     pub status: ChannelState,
     pub id: Uuid,
@@ -162,7 +162,9 @@ impl RealtimeChannel {
     }
 
     pub fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
-        // TODO inject channel topic to message here
+        // inject channel topic to message here
+        let mut message = message.clone();
+        message.topic = self.topic.clone();
 
         if self.status == ChannelState::Leaving {
             return Err(ChannelSendError::ChannelError(self.status));
@@ -194,7 +196,7 @@ impl RealtimeChannel {
     pub fn on_broadcast(
         &mut self,
         event: String,
-        callback: impl FnMut(&RealtimeMessage) + 'static,
+        callback: impl FnMut(&HashMap<String, Value>) + 'static,
     ) -> &mut RealtimeChannel {
         if let None = self.broadcast_callbacks.get_mut(&event) {
             self.broadcast_callbacks.insert(event.clone(), vec![]);
@@ -287,7 +289,7 @@ impl RealtimeChannel {
             Payload::Broadcast(payload) => {
                 if let Some(callbacks) = self.broadcast_callbacks.get_mut(&payload.event) {
                     for cb in callbacks {
-                        cb(&message);
+                        cb(&payload.payload);
                     }
                 }
             }
