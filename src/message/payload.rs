@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::sync::realtime_presence::{PresenceEvent, RawPresenceDiff, RawPresenceState};
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Payload {
@@ -10,15 +12,49 @@ pub enum Payload {
     Response(JoinResponsePayload),
     System(SystemPayload),
     AccessToken(AccessTokenPayload),
-    PostgresChange(PostgresChangePayload), // TODO rename because clashes
+    PostgresChanges(PostgresChangesPayload),
     Broadcast(BroadcastPayload),
-    Empty {}, // TODO perf: implement custom deser cos this bad. typechecking: this matches
+    PresenceState(RawPresenceState),
+    PresenceDiff(RawPresenceDiff),
+    Reply(ReplyPayload),                 // think is only used for heartbeat?
+    PresenceTrack(PresenceTrackPayload), // TODO matches greedily
+    Empty {}, // TODO implement custom deser cos this bad. typechecking: this matches
               // everything that can't deser elsewhere. not good.
 }
 
 impl Default for Payload {
     fn default() -> Self {
         Payload::Broadcast(BroadcastPayload::default())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ReplyPayload {
+    response: Value,
+    status: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PresenceTrackPayload {
+    event: PresenceEvent,
+    payload: HashMap<String, Value>,
+}
+
+impl Default for PresenceTrackPayload {
+    fn default() -> Self {
+        Self {
+            event: PresenceEvent::Track,
+            payload: HashMap::new(),
+        }
+    }
+}
+
+impl From<HashMap<String, Value>> for PresenceTrackPayload {
+    fn from(value: HashMap<String, Value>) -> Self {
+        PresenceTrackPayload {
+            payload: value,
+            ..Default::default()
+        }
     }
 }
 
@@ -41,7 +77,7 @@ impl Default for BroadcastPayload {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PostgresChangePayload {
+pub struct PostgresChangesPayload {
     pub data: PostgresChangeData,
     ids: Vec<usize>,
 }
@@ -54,7 +90,7 @@ pub struct PostgresChangeData {
     old_record: Option<PostgresOldDataRef>,
     record: Option<HashMap<String, Value>>,
     #[serde(rename = "type")]
-    pub change_type: PostgresEvent,
+    pub change_type: PostgresChangesEvent,
     pub schema: String,
     pub table: String,
 }
@@ -114,11 +150,11 @@ pub struct JoinConfigBroadcast {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfigPresence {
-    pub key: String,
+    pub key: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Default, Clone)]
-pub enum PostgresEvent {
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Default, Clone, Hash)]
+pub enum PostgresChangesEvent {
     #[serde(rename = "*")]
     #[default]
     All,
@@ -132,7 +168,7 @@ pub enum PostgresEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct PostgresChange {
-    pub event: PostgresEvent,
+    pub event: PostgresChangesEvent,
     pub schema: String,
     pub table: String,
     #[serde(skip_serializing_if = "Option::is_none")]

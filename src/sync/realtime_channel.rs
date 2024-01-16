@@ -1,19 +1,20 @@
+use serde_json::Value;
 use uuid::Uuid;
 
-use crate::message::message_filter::{MessageFilter, MessageFilterEvent};
+use crate::message::cdc_message_filter::CdcMessageFilter;
 use crate::message::payload::{
-    AccessTokenPayload, JoinPayload, Payload, PayloadStatus, PostgresChange,
+    AccessTokenPayload, JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, Payload,
+    PayloadStatus, PostgresChange, PostgresChangesEvent,
 };
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
-use crate::sync::realtime_client::RealtimeClient;
+use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
 
-pub type RealtimeCallback = (
-    MessageEvent,
-    MessageFilter,
-    Box<dyn FnMut(&RealtimeMessage)>,
-);
+use super::realtime_presence::{PresenceEvent, PresenceState};
+
+pub type RealtimeCallback = (CdcMessageFilter, Box<dyn FnMut(&RealtimeMessage)>);
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ChannelState {
@@ -37,12 +38,17 @@ pub enum ChannelCreateError {
 
 pub struct RealtimeChannel {
     pub topic: String,
-    pub callbacks: Vec<RealtimeCallback>, // TODO 2d vec [event][callback] for better memory access
+    cdc_callbacks: HashMap<PostgresChangesEvent, Vec<RealtimeCallback>>,
+    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&RealtimeMessage)>>>,
     tx: mpsc::Sender<RealtimeMessage>,
     pub status: ChannelState,
     pub id: Uuid,
     join_payload: JoinPayload,
+    presence: RealtimePresence,
+    message_queue: Vec<RealtimeMessage>,
 }
+
+// TODO channel options with broadcast + presence settings
 
 impl RealtimeChannel {
     pub(crate) fn new(
@@ -55,24 +61,39 @@ impl RealtimeChannel {
 
         Ok(RealtimeChannel {
             topic,
-            callbacks: vec![],
+            cdc_callbacks: Default::default(),
+            broadcast_callbacks: Default::default(),
             tx: client.outbound_channel.0.clone(),
             status: ChannelState::Closed,
             join_payload: JoinPayload {
                 access_token: Some(access_token),
+                config: JoinConfig {
+                    presence: JoinConfigPresence {
+                        key: Some("".into()),
+                    },
+                    broadcast: JoinConfigBroadcast {
+                        broadcast_self: true,
+                        ack: true,
+                    },
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             id,
+            presence: RealtimePresence::default(),
+            message_queue: vec![],
         })
     }
 
     pub fn subscribe(&mut self) -> Uuid {
         let join_message = RealtimeMessage {
-            event: MessageEvent::Join,
+            event: MessageEvent::PhxJoin,
             topic: self.topic.clone(),
             payload: Payload::Join(self.join_payload.clone()),
             message_ref: Some(self.id.into()),
         };
+
+        self.status = ChannelState::Joining;
 
         let _ = self.tx.send(join_message.into());
 
@@ -85,7 +106,7 @@ impl RealtimeChannel {
         }
 
         match self.send(RealtimeMessage {
-            event: MessageEvent::Leave,
+            event: MessageEvent::PhxLeave,
             topic: self.topic.clone(),
             payload: Payload::Empty {},
             message_ref: Some(format!("{}+leave", self.id)),
@@ -95,8 +116,7 @@ impl RealtimeChannel {
                 Ok(self.status)
             }
             Err(ChannelSendError::ChannelError(status)) => return Ok(status),
-            // TODO too verbose
-            Err(ChannelSendError::SendError(e)) => return Err(ChannelSendError::SendError(e)),
+            Err(e) => return Err(e),
         }
     }
 
@@ -117,50 +137,113 @@ impl RealtimeChannel {
         self.send(access_token_message)
     }
 
-    pub fn presence_state(&self) {
-        // TODO
+    pub fn presence_state(&self) -> PresenceState {
+        self.presence.state.clone().into()
     }
 
-    pub fn track(&mut self) {
-        // TODO
+    pub fn track(&mut self, payload: HashMap<String, Value>) -> &mut RealtimeChannel {
+        let _ = self.send(RealtimeMessage {
+            event: MessageEvent::Presence,
+            topic: self.topic.clone(),
+            payload: Payload::PresenceTrack(payload.into()),
+            message_ref: None,
+        });
+
+        self
     }
 
     pub fn untrack(&mut self) {
-        // TODO
+        let _ = self.send(RealtimeMessage {
+            event: MessageEvent::Untrack,
+            topic: self.topic.clone(),
+            payload: Payload::Empty {},
+            message_ref: None,
+        });
     }
 
-    pub fn send(&self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
-        if self.status == ChannelState::Closed || self.status == ChannelState::Leaving {
+    pub fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
+        // TODO inject channel topic to message here
+
+        if self.status == ChannelState::Leaving {
+            return Err(ChannelSendError::ChannelError(self.status));
+        }
+        // queue message
+        // TODO use mpsc channel as queue, drain only when realtime channel ready?
+        // prevents need for mut access when sending
+        self.message_queue.push(message);
+
+        self.drain_queue()
+    }
+
+    pub(crate) fn drain_queue(&mut self) -> Result<(), ChannelSendError> {
+        if self.status != ChannelState::Joined && self.status != ChannelState::Joining {
             return Err(ChannelSendError::ChannelError(self.status));
         }
 
-        match self.tx.send(message) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(ChannelSendError::SendError(e)),
+        while !self.message_queue.is_empty() {
+            if let Err(e) = self.tx.send(self.message_queue.pop().unwrap()) {
+                return Err(ChannelSendError::SendError(e));
+            }
         }
+
+        Ok(())
     }
 
-    pub fn on(
+    // TODO on_message handler for sys messages and presence_state and presence_diff
+
+    pub fn on_broadcast(
         &mut self,
-        event: MessageEvent,
-        filter: MessageFilter,
+        event: String,
         callback: impl FnMut(&RealtimeMessage) + 'static,
-    ) -> &mut Self {
-        if let MessageFilterEvent::PostgresCDC(cdc_event) = filter.event.clone() {
-            self.join_payload
-                .config
-                .postgres_changes
-                .push(PostgresChange {
-                    event: cdc_event,
-                    schema: filter.schema.clone(),
-                    table: filter.table.clone().unwrap_or("".into()),
-                    filter: filter.filter.clone(),
-                });
+    ) -> &mut RealtimeChannel {
+        if let None = self.broadcast_callbacks.get_mut(&event) {
+            self.broadcast_callbacks.insert(event.clone(), vec![]);
         }
 
-        self.callbacks.push((event, filter, Box::new(callback)));
+        self.broadcast_callbacks
+            .get_mut(&event)
+            .unwrap_or(&mut vec![])
+            .push(Box::new(callback));
+
+        self
+    }
+
+    pub fn on_cdc(
+        &mut self,
+        event: PostgresChangesEvent,
+        filter: CdcMessageFilter,
+        callback: impl FnMut(&RealtimeMessage) + 'static,
+    ) -> &mut Self {
+        self.join_payload
+            .config
+            .postgres_changes
+            .push(PostgresChange {
+                event: event.clone(),
+                schema: filter.schema.clone(),
+                table: filter.table.clone().unwrap_or("".into()),
+                filter: filter.filter.clone(),
+            });
+
+        if let None = self.cdc_callbacks.get_mut(&event) {
+            self.cdc_callbacks.insert(event.clone(), vec![]);
+        }
+
+        self.cdc_callbacks
+            .get_mut(&event)
+            .unwrap_or(&mut vec![])
+            .push((filter, Box::new(callback)));
 
         return self;
+    }
+
+    pub fn on_presence(
+        &mut self,
+        event: PresenceEvent,
+        // TODO callback type alias
+        callback: impl FnMut(String, PresenceState, PresenceState) + 'static,
+    ) -> &mut RealtimeChannel {
+        self.presence.add_callback(event, Box::new(callback));
+        self
     }
 
     pub fn recieve(&mut self, message: RealtimeMessage) {
@@ -174,15 +257,49 @@ impl RealtimeChannel {
                     self.status = ChannelState::Joined;
                 }
             }
+            Payload::PresenceState(state) => self.presence.sync(state.clone().into()),
+            Payload::PresenceDiff(raw_diff) => {
+                self.presence.sync_diff(raw_diff.clone().into());
+            }
+            Payload::PostgresChanges(payload) => {
+                let event = &payload.data.change_type;
+
+                for cdc_callback in self.cdc_callbacks.get_mut(&event).unwrap_or(&mut vec![]) {
+                    let ref filter = cdc_callback.0;
+
+                    if let Some(message) = filter.check(message.clone()) {
+                        cdc_callback.1(&message);
+                    }
+                }
+
+                for cdc_callback in self
+                    .cdc_callbacks
+                    .get_mut(&PostgresChangesEvent::All)
+                    .unwrap_or(&mut vec![])
+                {
+                    let ref filter = cdc_callback.0;
+
+                    if let Some(message) = filter.check(message.clone()) {
+                        cdc_callback.1(&message);
+                    }
+                }
+            }
+            Payload::Broadcast(payload) => {
+                if let Some(callbacks) = self.broadcast_callbacks.get_mut(&payload.event) {
+                    for cb in callbacks {
+                        cb(&message);
+                    }
+                }
+            }
             _ => {}
         }
 
         match &message.event {
-            MessageEvent::Close => {
+            MessageEvent::PhxClose => {
                 self.status = ChannelState::Closed;
                 println!("Channel Closed! {:?}", self.id);
             }
-            MessageEvent::Reply => {
+            MessageEvent::PhxReply => {
                 if &message.message_ref.clone().unwrap_or("#NOREF".to_string())
                     == &format!("{}+leave", self.id)
                 {
@@ -190,15 +307,7 @@ impl RealtimeChannel {
                     println!("Channel Closed! {:?}", self.id);
                 }
             }
-            _ => {
-                for (event, filter, callback) in &mut self.callbacks {
-                    if let Some(message) = filter.clone().check(message.clone()) {
-                        if *event == message.event {
-                            callback(&message);
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
     }
 }

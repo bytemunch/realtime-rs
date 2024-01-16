@@ -7,7 +7,6 @@ use crate::message::payload::Payload;
 pub struct RealtimeMessage {
     pub event: MessageEvent,
     pub topic: String,
-    // TODO payload structure
     pub payload: Payload,
     #[serde(rename = "ref")]
     pub message_ref: Option<String>,
@@ -32,28 +31,22 @@ impl Into<Message> for RealtimeMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Default, Clone)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageEvent {
-    #[serde(rename = "phx_close")]
-    Close,
-    #[serde(rename = "phx_error")]
-    Error,
-    #[serde(rename = "phx_join")]
-    Join,
-    #[serde(rename = "phx_reply")]
-    Reply,
-    #[serde(rename = "phx_leave")]
-    Leave,
-    #[serde(rename = "access_token")]
+    PhxClose,
+    PhxError,
+    PhxJoin,
+    PhxReply,
+    PhxLeave,
     AccessToken,
-    #[serde(rename = "presence_state")]
-    PresenceState,
-    #[serde(rename = "system")]
+    Presence,
     System,
-    #[serde(rename = "heartbeat")]
     Heartbeat,
-    #[serde(rename = "postgres_changes")]
     PostgresChanges,
+    PresenceState,
+    PresenceDiff,
+    Track,
+    Untrack,
     #[default]
-    #[serde(rename = "broadcast")]
     Broadcast,
 }

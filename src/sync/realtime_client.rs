@@ -358,7 +358,7 @@ impl RealtimeClient {
                         return self.retry_handshake(mid_hs);
                     }
 
-                    return Err(SocketError::TooManyRetries); // TODO placeholder, fix error types
+                    return Err(SocketError::TooManyRetries);
                 }
                 HandshakeError::Failure(_err) => {
                     // TODO pass error data
@@ -455,7 +455,6 @@ impl RealtimeClient {
                     Ok(())
                 }
                 Message::Close(_close_message) => {
-                    // TODO disconnect
                     self.disconnect();
                     Err(SocketError::Disconnected)
                 }
@@ -554,8 +553,8 @@ impl RealtimeClient {
         }
     }
 
-    pub fn get_channel(&self, channel_id: Uuid) -> Option<&RealtimeChannel> {
-        self.channels.get(&channel_id)
+    pub fn get_channel(&mut self, channel_id: Uuid) -> Option<&mut RealtimeChannel> {
+        self.channels.get_mut(&channel_id)
     }
 
     pub fn get_channels(&self) -> &HashMap<Uuid, RealtimeChannel> {
@@ -631,6 +630,7 @@ impl RealtimeClient {
         }
     }
 
+    // TODO look into if middleware is needed?
     pub fn add_middleware(
         &mut self,
         middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>,
@@ -681,6 +681,13 @@ impl RealtimeClient {
         }
 
         self.run_heartbeat();
+
+        for (_id, channel) in &mut self.channels {
+            if let Err(_e) = channel.drain_queue() {
+                // all errors here are wouldblock, i think
+                //return Err(NextMessageError::NoChannel);
+            }
+        }
 
         match self.write_socket() {
             Ok(()) => {}

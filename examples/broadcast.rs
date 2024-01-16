@@ -2,7 +2,6 @@ use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::{
-        message_filter::{MessageFilter, MessageFilterEvent},
         payload::{BroadcastPayload, Payload},
         realtime_message::{MessageEvent, RealtimeMessage},
     },
@@ -23,16 +22,9 @@ fn main() {
     let channel_a = client
         .channel("room-1".into())
         .expect("Channel broke: ")
-        .on(
-            MessageEvent::Broadcast,
-            MessageFilter {
-                event: MessageFilterEvent::Custom("banana".into()),
-                ..Default::default()
-            },
-            |msg| {
-                println!("[BROADCAST RECV] {:?}", msg);
-            },
-        )
+        .on_broadcast("banana".into(), |msg| {
+            println!("[BROADCAST RECV] {:?}", msg);
+        })
         .subscribe();
 
     let channel_b = client
@@ -48,13 +40,13 @@ fn main() {
                 println!("Message forwarded to {:?}", topic)
             }
             Err(NextMessageError::WouldBlock) => {}
-            Err(e) => {
+            Err(_e) => {
                 //println!("NextMessageError: {:?}", e)
             }
         }
 
         if sent_once {
-            client.disconnect();
+            //client.disconnect();
             continue;
         }
 

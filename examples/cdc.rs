@@ -1,11 +1,7 @@
 use std::env;
 
 use realtime_rs::{
-    message::{
-        message_filter::{MessageFilter, MessageFilterEvent},
-        payload::PostgresEvent,
-        realtime_message::MessageEvent,
-    },
+    message::{cdc_message_filter::CdcMessageFilter, payload::PostgresChangesEvent},
     sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
 };
 
@@ -23,15 +19,14 @@ fn main() {
     client
         .channel("channel_1".to_string())
         .expect("")
-        .on(
-            MessageEvent::PostgresChanges,
-            MessageFilter {
-                event: MessageFilterEvent::PostgresCDC(PostgresEvent::Update),
+        .on_cdc(
+            PostgresChangesEvent::All,
+            CdcMessageFilter {
                 schema: "public".into(),
                 table: Some("todos".into()),
                 ..Default::default()
             },
-            |msg| println!("Channel 1, Update:\n{:?}", msg),
+            |msg| println!("Channel 1:\n{:?}", msg),
         )
         .subscribe();
 
