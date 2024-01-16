@@ -300,8 +300,12 @@ impl RealtimeChannel {
 
         match &message.event {
             MessageEvent::PhxClose => {
-                self.status = ChannelState::Closed;
-                println!("Channel Closed! {:?}", self.id);
+                if let Some(message_ref) = message.message_ref {
+                    if message_ref == self.id.to_string() {
+                        self.status = ChannelState::Closed;
+                        println!("Channel Closed! {:?}", self.id);
+                    }
+                }
             }
             MessageEvent::PhxReply => {
                 if &message.message_ref.clone().unwrap_or("#NOREF".to_string())

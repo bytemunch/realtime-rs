@@ -26,17 +26,22 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Client `set_auth` + cascade through channels
    > Untested cos no GoTrue, or supabase Auth, or whatever it's calling itself nowadays. May look into remedying this lack of auth once realtime is done
  - [x] Presence
+ - [x] Blocking `.subscribe()`
+   > currently implemented on the client due to my skill issues with the borrow checker. plan to move it to channel once builders are implemented properly
 
 ### TODOs
 
- - [ ] Middleware example
+ - [ ] CLI broadcast chatroom
+ - [ ] Test auth flow (just pinch tokens from js and stick them in by hand for now)
  - [ ] Real world use case example
    > like getting realtime data and doing something in the main loop in response. perhaps an 'updates since connected' counter
    > will probably need an `mpsc` for moving data out of callback closures
  - [ ] Refactor all the stupid out
     > - [ ] Better client state management
+ - [ ] Throttling
  - [ ] Lock down a clean API
  - [ ] Docs
+ - [ ] Middleware example (?) try using current API see if middleware needed
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
  - [ ] Async client + do it all again

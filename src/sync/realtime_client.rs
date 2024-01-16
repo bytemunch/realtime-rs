@@ -621,6 +621,43 @@ impl RealtimeClient {
         self.channels.clear();
     }
 
+    pub fn block_until_subscribed(&mut self, channel_id: Uuid) -> Result<Uuid, ()> {
+        // TODO work WITH the borrow checker, not against it. Probably some combination of ref mut
+        let channel = self.channels.get_mut(&channel_id).unwrap();
+
+        if channel.status == ChannelState::Joined {
+            return Ok(channel.id);
+        }
+
+        if channel.status != ChannelState::Joining {
+            self.channels.get_mut(&channel_id).unwrap().subscribe();
+        }
+
+        loop {
+            match self.next_message() {
+                Ok(topic) => {
+                    println!("[Blocking Subscribe] Message forwarded to {:?}", topic)
+                }
+                Err(NextMessageError::WouldBlock) => {}
+                Err(_e) => {
+                    //println!("NextMessageError: {:?}", e)
+                }
+            }
+
+            let channel = self.channels.get_mut(&channel_id).unwrap();
+
+            match channel.status {
+                ChannelState::Joined => {
+                    break;
+                }
+                ChannelState::Closed => return Err(()),
+                _ => {}
+            }
+        }
+
+        Ok(channel_id)
+    }
+
     pub fn set_auth(&mut self, access_token: String) {
         println!("TODO, untested, need to get an auth token to test with somehow. Might just whip up a quick and dirty auth helper for now.");
         self.access_token = access_token.clone();
