@@ -11,6 +11,9 @@ use std::{
     time::Duration,
 };
 
+use reqwest::header::CONTENT_TYPE;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tungstenite::Message;
 use tungstenite::{
     client::{uri_mode, IntoClientRequest},
@@ -94,6 +97,16 @@ pub enum MonitorSignal {
     Reconnect,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct AuthResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: usize,
+    expires_at: usize,
+    refresh_token: String,
+    user: HashMap<String, Value>,
+}
+
 pub struct RealtimeClientOptions {
     pub headers: Option<HeaderMap>,
     pub params: Option<HashMap<String, String>>,
@@ -104,6 +117,7 @@ pub struct RealtimeClientOptions {
     pub reconnect_interval: Box<dyn Fn(usize) -> Duration>, // impl debug euuurgh there's got to be a better way
     pub reconnect_max_attempts: usize,
     pub connection_timeout: Duration,
+    pub auth_url: Option<String>,
 }
 
 impl Debug for RealtimeClientOptions {
@@ -127,6 +141,7 @@ impl Default for RealtimeClientOptions {
             reconnect_interval: Box::new(backoff),
             reconnect_max_attempts: usize::MAX,
             connection_timeout: Duration::from_secs(10),
+            auth_url: None,
         }
     }
 }
@@ -658,11 +673,32 @@ impl RealtimeClient {
         Ok(channel_id)
     }
 
+    pub fn sign_in_with_email_password(&mut self, email: String, password: String) {
+        let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client
+        let url = self
+            .options
+            .auth_url
+            .clone()
+            .unwrap_or(self.endpoint.clone());
+
+        let res = client
+            .post(format!("{}/token?grant_type=password", url))
+            .header(CONTENT_TYPE, "application/json")
+            .body(json!({"email": email, "password": password}).to_string())
+            .send();
+
+        if let Ok(res) = res {
+            let res: AuthResponse = res.json().unwrap();
+
+            self.set_auth(res.access_token);
+        }
+    }
+
     pub fn set_auth(&mut self, access_token: String) {
-        println!("TODO, untested, need to get an auth token to test with somehow. Might just whip up a quick and dirty auth helper for now.");
         self.access_token = access_token.clone();
 
         for (_id, channel) in &mut self.channels {
+            // TODO single source of data for access token
             let _ = channel.set_auth(access_token.clone()); // TODO error handling
         }
     }

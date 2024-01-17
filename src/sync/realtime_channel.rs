@@ -191,7 +191,7 @@ impl RealtimeChannel {
         Ok(())
     }
 
-    // TODO on_message handler for sys messages and presence_state and presence_diff
+    // TODO on_message handler for sys messages
 
     pub fn on_broadcast(
         &mut self,
