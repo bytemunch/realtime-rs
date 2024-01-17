@@ -15,6 +15,7 @@ pub enum PresenceEvent {
 
 pub type RawPresenceState = HashMap<String, PresenceMetas>;
 
+pub type PresenceCallback = Box<dyn FnMut(String, PresenceState, PresenceState)>;
 //{
 //  abc123: {1: {foo: bar}, 2: {foo: baz} },
 //  def456: {3: {foo: baz}, 4: {foo: bar} },
@@ -54,11 +55,11 @@ pub struct PresenceMetas {
     pub metas: Vec<PresenceMeta>,
 }
 
-impl Into<PresenceState> for RawPresenceState {
-    fn into(self) -> PresenceState {
+impl From<RawPresenceState> for PresenceState {
+    fn from(val: RawPresenceState) -> Self {
         let mut transformed_state = PresenceState(HashMap::new());
 
-        for (id, metas) in self {
+        for (id, metas) in val {
             let mut transformed_inner = HashMap::new();
 
             for meta in metas.metas {
@@ -78,11 +79,11 @@ pub struct RawPresenceDiff {
     leaves: RawPresenceState,
 }
 
-impl Into<PresenceDiff> for RawPresenceDiff {
-    fn into(self) -> PresenceDiff {
+impl From<RawPresenceDiff> for PresenceDiff {
+    fn from(val: RawPresenceDiff) -> Self {
         PresenceDiff {
-            joins: self.joins.into(),
-            leaves: self.leaves.into(),
+            joins: val.joins.into(),
+            leaves: val.leaves.into(),
         }
     }
 }
@@ -96,16 +97,11 @@ pub struct PresenceDiff {
 #[derive(Default)]
 pub struct RealtimePresence {
     pub state: PresenceState,
-    callbacks: HashMap<PresenceEvent, Vec<Box<dyn FnMut(String, PresenceState, PresenceState)>>>,
+    callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
 }
 
 impl RealtimePresence {
-    pub fn from_channel_builder(
-        callbacks: HashMap<
-            PresenceEvent,
-            Vec<Box<dyn FnMut(String, PresenceState, PresenceState)>>,
-        >,
-    ) -> Self {
+    pub fn from_channel_builder(callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>) -> Self {
         Self {
             state: PresenceState::default(),
             callbacks,
@@ -116,7 +112,7 @@ impl RealtimePresence {
         event: PresenceEvent,
         callback: Box<dyn FnMut(String, PresenceState, PresenceState)>,
     ) {
-        if let None = self.callbacks.get(&event) {
+        if self.callbacks.get(&event).is_none() {
             self.callbacks.insert(event.clone(), vec![]);
         }
 
@@ -135,16 +131,11 @@ impl RealtimePresence {
             .map(|(new_id, mut new_phx_map)| {
                 new_phx_map.retain(|new_phx_ref, _new_state_data| {
                     let mut retain = true;
-                    let _ = self
-                        .state
-                        .0
-                        .clone()
-                        .into_iter()
-                        .map(|(_self_id, self_phx_map)| {
-                            if self_phx_map.contains_key(new_phx_ref) {
-                                retain = false;
-                            }
-                        });
+                    let _ = self.state.0.clone().into_values().map(|self_phx_map| {
+                        if self_phx_map.contains_key(new_phx_ref) {
+                            retain = false;
+                        }
+                    });
                     retain
                 });
 
@@ -160,15 +151,11 @@ impl RealtimePresence {
             .map(|(current_id, mut current_phx_map)| {
                 current_phx_map.retain(|current_phx_ref, _current_state_data| {
                     let mut retain = false;
-                    let _ = new_state
-                        .0
-                        .clone()
-                        .into_iter()
-                        .map(|(_new_id, new_phx_map)| {
-                            if !new_phx_map.contains_key(current_phx_ref) {
-                                retain = true;
-                            }
-                        });
+                    let _ = new_state.0.clone().into_values().map(|new_phx_map| {
+                        if !new_phx_map.contains_key(current_phx_ref) {
+                            retain = true;
+                        }
+                    });
                     retain
                 });
 

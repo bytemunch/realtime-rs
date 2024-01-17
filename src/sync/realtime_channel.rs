@@ -1,20 +1,25 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::message::cdc_message_filter::CdcMessageFilter;
-use crate::message::payload::{
-    AccessTokenPayload, BroadcastConfig, JoinConfig, JoinPayload, Payload, PayloadStatus,
-    PostgresChange, PostgresChangesEvent, PostgresChangesPayload, PresenceConfig,
+use crate::message::{
+    cdc_message_filter::CdcMessageFilter,
+    payload::{
+        AccessTokenPayload, BroadcastConfig, JoinConfig, JoinPayload, Payload, PayloadStatus,
+        PostgresChange, PostgresChangesEvent, PostgresChangesPayload, PresenceConfig,
+    },
+    realtime_message::{MessageEvent, RealtimeMessage},
 };
-use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
-use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
+
+use crate::sync::{
+    realtime_client::RealtimeClient,
+    realtime_presence::{PresenceCallback, PresenceEvent, PresenceState, RealtimePresence},
+};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
 
-use crate::sync::realtime_presence::{PresenceEvent, PresenceState};
-
 pub type CdcCallback = (CdcMessageFilter, Box<dyn FnMut(&PostgresChangesPayload)>);
+pub type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>)>;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ChannelState {
@@ -39,7 +44,7 @@ pub enum ChannelCreateError {
 pub struct RealtimeChannel {
     pub topic: String,
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
-    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&HashMap<String, Value>)>>>,
+    broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
     tx: mpsc::Sender<RealtimeMessage>,
     pub status: ChannelState,
     pub id: Uuid,
@@ -65,7 +70,7 @@ impl RealtimeChannel {
 
         self.status = ChannelState::Joining;
 
-        let _ = self.tx.send(join_message.into());
+        let _ = self.tx.send(join_message);
     }
 
     pub fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
@@ -83,8 +88,8 @@ impl RealtimeChannel {
                 self.status = ChannelState::Leaving;
                 Ok(self.status)
             }
-            Err(ChannelSendError::ChannelError(status)) => return Ok(status),
-            Err(e) => return Err(e),
+            Err(ChannelSendError::ChannelError(status)) => Ok(status),
+            Err(e) => Err(e),
         }
     }
 
@@ -106,7 +111,7 @@ impl RealtimeChannel {
     }
 
     pub fn presence_state(&self) -> PresenceState {
-        self.presence.state.clone().into()
+        self.presence.state.clone()
     }
 
     pub fn track(&mut self, payload: HashMap<String, Value>) -> &mut RealtimeChannel {
@@ -177,13 +182,13 @@ impl RealtimeChannel {
             Payload::PostgresChanges(payload) => {
                 let event = &payload.data.change_type;
 
-                for cdc_callback in self.cdc_callbacks.get_mut(&event).unwrap_or(&mut vec![]) {
-                    let ref filter = cdc_callback.0;
+                for cdc_callback in self.cdc_callbacks.get_mut(event).unwrap_or(&mut vec![]) {
+                    let filter = &cdc_callback.0;
 
                     // TODO REFAC pointless message clones when not using result; filter.check
                     // should borrow and return bool/result
                     if let Some(_message) = filter.check(message.clone()) {
-                        cdc_callback.1(&payload);
+                        cdc_callback.1(payload);
                     }
                 }
 
@@ -192,10 +197,10 @@ impl RealtimeChannel {
                     .get_mut(&PostgresChangesEvent::All)
                     .unwrap_or(&mut vec![])
                 {
-                    let ref filter = cdc_callback.0;
+                    let filter = &cdc_callback.0;
 
                     if let Some(_message) = filter.check(message.clone()) {
-                        cdc_callback.1(&payload);
+                        cdc_callback.1(payload);
                     }
                 }
             }
@@ -219,8 +224,8 @@ impl RealtimeChannel {
                 }
             }
             MessageEvent::PhxReply => {
-                if &message.message_ref.clone().unwrap_or("#NOREF".to_string())
-                    == &format!("{}+leave", self.id)
+                if message.message_ref.clone().unwrap_or("#NOREF".to_string())
+                    == format!("{}+leave", self.id)
                 {
                     self.status = ChannelState::Closed;
                     println!("Channel Closed! {:?}", self.id);
@@ -248,9 +253,8 @@ pub struct RealtimeChannelBuilder {
     id: Uuid,
     postgres_changes: Vec<PostgresChange>,
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
-    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&HashMap<String, Value>)>>>,
-    presence_callbacks:
-        HashMap<PresenceEvent, Vec<Box<dyn FnMut(String, PresenceState, PresenceState)>>>,
+    broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
+    presence_callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
     tx: mpsc::Sender<RealtimeMessage>,
 }
 
@@ -297,7 +301,7 @@ impl RealtimeChannelBuilder {
             filter: filter.filter.clone(),
         });
 
-        if let None = self.cdc_callbacks.get_mut(&event) {
+        if self.cdc_callbacks.get_mut(&event).is_none() {
             self.cdc_callbacks.insert(event.clone(), vec![]);
         }
 
@@ -315,7 +319,7 @@ impl RealtimeChannelBuilder {
         // TODO callback type alias
         callback: impl FnMut(String, PresenceState, PresenceState) + 'static,
     ) -> Self {
-        if let None = self.presence_callbacks.get_mut(&event) {
+        if self.presence_callbacks.get_mut(&event).is_none() {
             self.presence_callbacks.insert(event.clone(), vec![]);
         }
 
@@ -332,7 +336,7 @@ impl RealtimeChannelBuilder {
         event: String,
         callback: impl FnMut(&HashMap<String, Value>) + 'static,
     ) -> Self {
-        if let None = self.broadcast_callbacks.get_mut(&event) {
+        if self.broadcast_callbacks.get_mut(&event).is_none() {
             self.broadcast_callbacks.insert(event.clone(), vec![]);
         }
 

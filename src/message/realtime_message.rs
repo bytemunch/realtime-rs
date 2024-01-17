@@ -62,9 +62,9 @@ impl RealtimeMessage {
     }
 }
 
-impl Into<Message> for RealtimeMessage {
-    fn into(self) -> Message {
-        let data = serde_json::to_string(&self).expect("Uhoh cannot into message");
+impl From<RealtimeMessage> for Message {
+    fn from(val: RealtimeMessage) -> Self {
+        let data = serde_json::to_string(&val).expect("Uhoh cannot into message");
         Message::Text(data)
     }
 }

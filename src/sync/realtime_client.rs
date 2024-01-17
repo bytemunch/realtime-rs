@@ -19,9 +19,9 @@ use tungstenite::{
     client::{uri_mode, IntoClientRequest},
     client_tls,
     handshake::MidHandshake,
-    http::{HeaderMap, HeaderValue, Response, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, Uri},
     stream::{MaybeTlsStream, Mode, NoDelay},
-    ClientHandshake, Error, HandshakeError, WebSocket,
+    ClientHandshake, Error, HandshakeError, WebSocket as WebSocketWrapper,
 };
 use uuid::Uuid;
 
@@ -30,6 +30,9 @@ use crate::message::realtime_message::RealtimeMessage;
 use crate::sync::realtime_channel::{ChannelState, RealtimeChannel};
 
 use super::realtime_channel::RealtimeChannelBuilder;
+
+pub type Response = HttpResponse<Option<Vec<u8>>>;
+pub type WebSocket = WebSocketWrapper<MaybeTlsStream<TcpStream>>;
 
 #[derive(PartialEq, Debug, Default)]
 pub enum ConnectionState {
@@ -127,7 +130,7 @@ impl Default for MonitorChannel {
 
 #[derive(Default)]
 pub struct RealtimeClient {
-    socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+    socket: Option<WebSocket>,
     channels: HashMap<Uuid, RealtimeChannel>,
     pub status: ConnectionState,
     pub access_token: String,
@@ -205,7 +208,7 @@ impl RealtimeClient {
         headers.insert("Authorization", auth);
 
         // unwrap: shouldn't fail
-        let xci: HeaderValue = format!("realtime-rs/0.1.0").parse().unwrap();
+        let xci: HeaderValue = "realtime-rs/0.1.0".to_string().parse().unwrap();
         headers.insert("X-Client-Info", xci);
 
         println!("Connecting... Req: {:?}\n", request);
@@ -257,13 +260,7 @@ impl RealtimeClient {
             return Err(ConnectError::NonblockingError);
         };
 
-        let conn: Result<
-            (
-                WebSocket<MaybeTlsStream<TcpStream>>,
-                Response<Option<Vec<u8>>>,
-            ),
-            Error,
-        > = match client_tls(request, stream) {
+        let conn: Result<(WebSocket, Response), Error> = match client_tls(request, stream) {
             Ok(stream) => {
                 self.reconnect_attempts = 0;
                 Ok(stream)
@@ -313,17 +310,9 @@ impl RealtimeClient {
     fn retry_handshake(
         &mut self,
         mid_hs: MidHandshake<ClientHandshake<MaybeTlsStream<TcpStream>>>,
-    ) -> Result<
-        (
-            WebSocket<MaybeTlsStream<TcpStream>>,
-            tungstenite::http::Response<Option<Vec<u8>>>,
-        ),
-        SocketError,
-    > {
+    ) -> Result<(WebSocket, Response), SocketError> {
         match mid_hs.handshake() {
-            Ok(stream) => {
-                return Ok(stream);
-            }
+            Ok(stream) => Ok(stream),
             Err(e) => match e {
                 HandshakeError::Interrupted(mid_hs) => {
                     // TODO sleeping main thread bad
@@ -334,11 +323,11 @@ impl RealtimeClient {
                         return self.retry_handshake(mid_hs);
                     }
 
-                    return Err(SocketError::TooManyRetries);
+                    Err(SocketError::TooManyRetries)
                 }
                 HandshakeError::Failure(_err) => {
                     // TODO pass error data
-                    return Err(SocketError::HandshakeError);
+                    Err(SocketError::HandshakeError)
                 }
             },
         }
@@ -371,7 +360,7 @@ impl RealtimeClient {
 
                     match self.connect() {
                         Ok(_) => {
-                            for (_id, channel) in &mut self.channels {
+                            for channel in self.channels.values_mut() {
                                 channel.subscribe();
                             }
 
@@ -512,8 +501,8 @@ impl RealtimeClient {
     }
 
     pub(crate) fn add_channel(&mut self, channel: RealtimeChannel) -> Uuid {
-        let id = channel.id.clone();
-        self.channels.insert(channel.id.clone(), channel);
+        let id = channel.id;
+        self.channels.insert(channel.id, channel);
         id
     }
 
@@ -533,7 +522,7 @@ impl RealtimeClient {
         if let Some(mut channel) = self.channels.remove(&channel_id) {
             let _ = channel.unsubscribe();
 
-            if self.channels.len() == 0 {
+            if self.channels.is_empty() {
                 self.disconnect();
             }
 
@@ -564,7 +553,7 @@ impl RealtimeClient {
 
             let mut all_channels_closed = true;
 
-            for (_id, channel) in &mut self.channels {
+            for channel in self.channels.values_mut() {
                 let channel_state = channel.unsubscribe();
 
                 match channel_state {
@@ -589,7 +578,7 @@ impl RealtimeClient {
         self.channels.clear();
     }
 
-    pub fn block_until_subscribed(&mut self, channel_id: Uuid) -> Result<Uuid, ()> {
+    pub fn block_until_subscribed(&mut self, channel_id: Uuid) -> Result<Uuid, ChannelState> {
         // TODO ergonomically this would fit better as a function on RealtimeChannel but borrow
         // checker
 
@@ -622,7 +611,7 @@ impl RealtimeClient {
                 ChannelState::Joined => {
                     break;
                 }
-                ChannelState::Closed => return Err(()),
+                ChannelState::Closed => return Err(ChannelState::Closed),
                 _ => {}
             }
         }
@@ -650,7 +639,7 @@ impl RealtimeClient {
     pub fn set_auth(&mut self, access_token: String) {
         self.access_token = access_token.clone();
 
-        for (_id, channel) in &mut self.channels {
+        for channel in self.channels.values_mut() {
             // TODO single source of data for access token
             let _ = channel.set_auth(access_token.clone()); // TODO error handling
         }
@@ -668,7 +657,7 @@ impl RealtimeClient {
     }
 
     pub fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {
-        for (_uuid, middleware) in &self.middleware {
+        for middleware in self.middleware.values() {
             message = middleware(message)
         }
         message
@@ -708,11 +697,9 @@ impl RealtimeClient {
 
         self.run_heartbeat();
 
-        for (_id, channel) in &mut self.channels {
-            if let Err(_e) = channel.drain_queue() {
-                // all errors here are wouldblock, i think
-                //return Err(NextMessageError::NoChannel);
-            }
+        for channel in self.channels.values_mut() {
+            let _ = channel.drain_queue();
+            // all errors here are wouldblock, i think
         }
 
         match self.write_socket() {
@@ -745,7 +732,7 @@ impl RealtimeClient {
                 for (id, channel) in &mut self.channels {
                     if channel.topic == message.topic {
                         channel.recieve(message.clone());
-                        ids.push(id.clone());
+                        ids.push(*id);
                     }
                 }
 
