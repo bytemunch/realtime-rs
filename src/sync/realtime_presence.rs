@@ -100,6 +100,17 @@ pub struct RealtimePresence {
 }
 
 impl RealtimePresence {
+    pub fn from_channel_builder(
+        callbacks: HashMap<
+            PresenceEvent,
+            Vec<Box<dyn FnMut(String, PresenceState, PresenceState)>>,
+        >,
+    ) -> Self {
+        Self {
+            state: PresenceState::default(),
+            callbacks,
+        }
+    }
     pub fn add_callback(
         &mut self,
         event: PresenceEvent,

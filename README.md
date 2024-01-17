@@ -30,7 +30,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
    > Untested cos no GoTrue, or supabase Auth, or whatever it's calling itself nowadays. May look into remedying this lack of auth once realtime is done
  - [x] Presence
  - [x] Blocking `.subscribe()`
-   > currently implemented on the client due to my skill issues with the borrow checker. plan to move it to channel once builders are implemented properly
+   > currently implemented on the client due to my skill issues with the borrow checker. plan to move it to channel once im good at coding
 
 #### Extra
 
@@ -38,10 +38,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
    > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
    > May be useless
  - [x] Placeholder function for email/password auth (immediately deprecated in favour of gotrue-rs or auth-rs or whatever it will be called.)
+ - [x] Builder patterns for client and channel
 
 ### TODOs
 
- - [ ] Implement builder patterns betterer
  - [ ] Example: CLI broadcast chatroom with active user list (accessed with a `/online` command)
  - [ ] Example: Pull data out of closure and modify state in a higher scope
  - [ ] Example: Act on system messages

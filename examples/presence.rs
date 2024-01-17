@@ -10,7 +10,7 @@ fn main() {
     let url = "ws://127.0.0.1:54321".into();
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut client = RealtimeClient::new(url, anon_key);
+    let mut client = RealtimeClient::builder(url, anon_key).build();
 
     let client = match client.connect() {
         Ok(client) => client,
@@ -22,7 +22,6 @@ fn main() {
 
     let channel_id = client
         .channel("channel_1".to_string())
-        .expect("")
         // TODO presence_state message event
         .on_presence(PresenceEvent::Sync, |key, _old_state, _new_state| {
             println!("Presence sync: {:?}", key);
@@ -33,10 +32,9 @@ fn main() {
         .on_presence(PresenceEvent::Leave, |key, _old_state, _new_statee| {
             println!("Presence leave: {:?}", key);
         })
-        // .track(presence_payload)
-        .subscribe();
+        .build(client);
 
-    println!("Client created: {:?}", client);
+    client.get_channel_mut(channel_id).subscribe();
 
     let mut sent_once = false;
 
@@ -59,11 +57,11 @@ fn main() {
             continue;
         }
 
-        if let Some(channel) = client.get_channel(channel_id) {
-            if channel.status == ChannelState::Joined {
-                channel.track(presence_payload.clone());
-                sent_once = true;
-            }
+        let channel = client.get_channel_mut(channel_id);
+
+        if channel.status == ChannelState::Joined {
+            channel.track(presence_payload.clone());
+            sent_once = true;
         }
     }
 

@@ -140,26 +140,25 @@ pub struct SystemPayload {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinPayload {
     pub config: JoinConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub access_token: Option<String>,
+    pub access_token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfig {
-    pub broadcast: JoinConfigBroadcast,
-    pub presence: JoinConfigPresence,
+    pub broadcast: BroadcastConfig,
+    pub presence: PresenceConfig,
     pub postgres_changes: Vec<PostgresChange>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct JoinConfigBroadcast {
+pub struct BroadcastConfig {
     #[serde(rename = "self")]
     pub(crate) broadcast_self: bool,
     pub(crate) ack: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct JoinConfigPresence {
+pub struct PresenceConfig {
     pub key: Option<String>,
 }
 

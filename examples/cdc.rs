@@ -1,10 +1,8 @@
-use std::env;
+use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::{cdc_message_filter::CdcMessageFilter, payload::PostgresChangesEvent},
-    sync::realtime_client::{
-        ConnectionState, NextMessageError, RealtimeClient, RealtimeClientOptions,
-    },
+    sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
 };
 
 fn main() {
@@ -13,23 +11,17 @@ fn main() {
 
     let auth_url = "http://192.168.64.6:9999".into();
 
-    let options = RealtimeClientOptions {
-        auth_url: Some(auth_url),
-        ..Default::default()
-    };
+    let mut client = RealtimeClient::builder(url, anon_key)
+        .auth_url(auth_url)
+        .build();
 
-    let mut client = RealtimeClient::new(url, anon_key);
-
-    client.set_options(options);
-
-    let client = match client.connect() {
-        Ok(client) => client,
+    match client.connect() {
+        Ok(_) => {}
         Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
     };
 
-    let channel = client
-        .channel("channel_1".to_string())
-        .expect("")
+    let channel_id = client
+        .channel("topic".into())
         .on_cdc(
             PostgresChangesEvent::All,
             CdcMessageFilter {
@@ -39,13 +31,13 @@ fn main() {
             },
             |msg| println!("Channel 1:\n{:?}", msg),
         )
-        .subscribe();
+        .build(&mut client);
 
-    let _ = client.block_until_subscribed(channel);
+    let _ = client.block_until_subscribed(channel_id);
+
+    client.get_channel_mut(channel_id).track(HashMap::new());
 
     client.sign_in_with_email_password("test@example.com".into(), "password".into());
-
-    println!("Client created: {:?}", client);
 
     loop {
         if client.status == ConnectionState::Closed {

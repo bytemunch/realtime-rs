@@ -27,7 +27,9 @@ use uuid::Uuid;
 
 use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
-use crate::sync::realtime_channel::{ChannelCreateError, ChannelState, RealtimeChannel};
+use crate::sync::realtime_channel::{ChannelState, RealtimeChannel};
+
+use super::realtime_channel::RealtimeChannelBuilder;
 
 #[derive(PartialEq, Debug, Default)]
 pub enum ConnectionState {
@@ -107,116 +109,77 @@ pub struct AuthResponse {
     user: HashMap<String, Value>,
 }
 
-pub struct RealtimeClientOptions {
-    pub headers: Option<HeaderMap>,
-    pub params: Option<HashMap<String, String>>,
-    pub heartbeat_interval: Duration,
-    pub client_ref: Option<String>,
-    pub encode: Option<String>,                             // placeholder
-    pub decode: Option<String>,                             // placeholder
-    pub reconnect_interval: Box<dyn Fn(usize) -> Duration>, // impl debug euuurgh there's got to be a better way
-    pub reconnect_max_attempts: usize,
-    pub connection_timeout: Duration,
-    pub auth_url: Option<String>,
-}
+pub struct MessageChannel((Sender<RealtimeMessage>, Receiver<RealtimeMessage>));
 
-impl Debug for RealtimeClientOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TODO debug options")
-    }
-}
-
-impl Default for RealtimeClientOptions {
+impl Default for MessageChannel {
     fn default() -> Self {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
-
-        Self {
-            headers: Some(headers),
-            params: None,
-            heartbeat_interval: Duration::from_secs(29),
-            client_ref: Default::default(),
-            encode: None,
-            decode: None,
-            reconnect_interval: Box::new(backoff),
-            reconnect_max_attempts: usize::MAX,
-            connection_timeout: Duration::from_secs(10),
-            auth_url: None,
-        }
+        Self(mpsc::channel())
     }
 }
 
+pub struct MonitorChannel((Sender<MonitorSignal>, Receiver<MonitorSignal>));
+
+impl Default for MonitorChannel {
+    fn default() -> Self {
+        Self(mpsc::channel())
+    }
+}
+
+#[derive(Default)]
 pub struct RealtimeClient {
-    pub socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+    socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
     pub status: ConnectionState,
-    endpoint: String,
     pub access_token: String,
     // mpsc
-    inbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
-    pub(crate) outbound_channel: (Sender<RealtimeMessage>, Receiver<RealtimeMessage>),
-    monitor_channel: (Sender<MonitorSignal>, Receiver<MonitorSignal>),
+    inbound_channel: MessageChannel,
+    pub(crate) outbound_channel: MessageChannel,
+    monitor_channel: MonitorChannel,
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
-    /// Options to be used in internal fns
-    options: RealtimeClientOptions,
     // timers
     reconnect_now: Option<SystemTime>,
     reconnect_delay: Duration,
     reconnect_attempts: usize,
     heartbeat_now: Option<SystemTime>,
-}
-
-impl Default for RealtimeClient {
-    fn default() -> Self {
-        Self {
-            socket: Default::default(),
-            channels: Default::default(),
-            inbound_channel: mpsc::channel(),
-            outbound_channel: mpsc::channel(),
-            monitor_channel: mpsc::channel(),
-            middleware: Default::default(),
-            options: Default::default(),
-            status: Default::default(),
-            endpoint: Default::default(),
-            access_token: Default::default(),
-            reconnect_delay: Default::default(),
-            reconnect_now: Default::default(),
-            reconnect_attempts: Default::default(),
-            heartbeat_now: Default::default(),
-        }
-    }
+    // builder options
+    headers: HeaderMap,
+    params: Option<HashMap<String, String>>,
+    heartbeat_interval: Duration,
+    client_ref: Option<String>,
+    encode: Option<String>, // placeholder
+    decode: Option<String>, // placeholder
+    reconnect_interval: ReconnectFn,
+    reconnect_max_attempts: usize,
+    connection_timeout: Duration,
+    auth_url: Option<String>,
+    endpoint: String,
 }
 
 impl Debug for RealtimeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // TODO this is horrid
         f.write_fmt(format_args!(
-            "{:?} {:?} {:?} {:?} {:?} {}",
+            "{:?} {:?} {:?} {:?}  {}",
             self.socket,
             self.channels,
-            self.inbound_channel,
-            self.outbound_channel,
-            self.options,
+            self.inbound_channel.0,
+            self.outbound_channel.0,
             "TODO middleware debug fmt"
         ))
     }
 }
 
 impl RealtimeClient {
-    pub fn new(url: String, anon_key: String) -> RealtimeClient {
-        RealtimeClient {
-            endpoint: url.parse().unwrap(),
-            access_token: anon_key,
-            inbound_channel: mpsc::channel(),
-            outbound_channel: mpsc::channel(),
-            monitor_channel: mpsc::channel(),
-            ..Default::default()
-        }
+    pub fn builder(endpoint: String, access_token: String) -> RealtimeClientBuilder {
+        RealtimeClientBuilder::new(endpoint, access_token)
     }
 
-    pub fn set_options(&mut self, options: RealtimeClientOptions) -> &mut RealtimeClient {
-        self.options = options;
-        self
+    pub fn channel(&mut self, topic: String) -> RealtimeChannelBuilder {
+        RealtimeChannelBuilder::new(self).topic(topic)
+    }
+
+    pub fn get_channel_tx(&self) -> Sender<RealtimeMessage> {
+        self.outbound_channel.0 .0.clone()
     }
 
     pub fn connect(&mut self) -> Result<&mut RealtimeClient, ConnectError> {
@@ -268,16 +231,16 @@ impl RealtimeClient {
 
         let mut stream = match TcpStream::connect_timeout(
             &addrs.next().expect("uhoh no addr"),
-            self.options.connection_timeout,
+            self.connection_timeout,
         ) {
             Ok(stream) => {
                 self.reconnect_attempts = 0;
                 stream
             }
             Err(_e) => {
-                if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                if self.reconnect_attempts < self.reconnect_max_attempts {
                     self.reconnect_attempts += 1;
-                    let backoff = self.options.reconnect_interval.as_ref();
+                    let backoff = self.reconnect_interval.0.as_ref();
                     sleep(backoff(self.reconnect_attempts));
                     return self.connect();
                 }
@@ -308,9 +271,9 @@ impl RealtimeClient {
             Err(err) => match err {
                 HandshakeError::Failure(_err) => {
                     // TODO DRY break reconnect attempts code into own fn
-                    if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                    if self.reconnect_attempts < self.reconnect_max_attempts {
                         self.reconnect_attempts += 1;
-                        let backoff = self.options.reconnect_interval.as_ref();
+                        let backoff = &self.reconnect_interval.0;
                         sleep(backoff(self.reconnect_attempts));
                         return self.connect();
                     }
@@ -320,9 +283,9 @@ impl RealtimeClient {
                 HandshakeError::Interrupted(mid_hs) => match self.retry_handshake(mid_hs) {
                     Ok(stream) => Ok(stream),
                     Err(_err) => {
-                        if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                        if self.reconnect_attempts < self.reconnect_max_attempts {
                             self.reconnect_attempts += 1;
-                            let backoff = self.options.reconnect_interval.as_ref();
+                            let backoff = &self.reconnect_interval.0;
                             sleep(backoff(self.reconnect_attempts));
                             return self.connect();
                         }
@@ -341,8 +304,6 @@ impl RealtimeClient {
         }
 
         self.socket = Some(socket);
-
-        println!("Socket ready");
 
         self.status = ConnectionState::Open;
 
@@ -366,9 +327,9 @@ impl RealtimeClient {
             Err(e) => match e {
                 HandshakeError::Interrupted(mid_hs) => {
                     // TODO sleeping main thread bad
-                    if self.reconnect_attempts < self.options.reconnect_max_attempts {
+                    if self.reconnect_attempts < self.reconnect_max_attempts {
                         self.reconnect_attempts += 1;
-                        let backoff = self.options.reconnect_interval.as_ref();
+                        let backoff = &self.reconnect_interval.0;
                         sleep(backoff(self.reconnect_attempts));
                         return self.retry_handshake(mid_hs);
                     }
@@ -387,11 +348,10 @@ impl RealtimeClient {
         if self.reconnect_now.is_none() {
             self.reconnect_now = Some(SystemTime::now());
 
-            self.reconnect_delay =
-                self.options.reconnect_interval.as_ref()(self.reconnect_attempts);
+            self.reconnect_delay = self.reconnect_interval.0(self.reconnect_attempts);
         }
 
-        match self.monitor_channel.1.try_recv() {
+        match self.monitor_channel.0 .1.try_recv() {
             Ok(signal) => match signal {
                 MonitorSignal::Reconnect => {
                     if self.status == ConnectionState::Open
@@ -401,7 +361,7 @@ impl RealtimeClient {
                         return Err(MonitorError::WouldBlock);
                     }
 
-                    if self.reconnect_attempts >= self.options.reconnect_max_attempts {
+                    if self.reconnect_attempts >= self.reconnect_max_attempts {
                         return Err(MonitorError::MaxReconnects);
                     }
 
@@ -435,7 +395,7 @@ impl RealtimeClient {
             self.heartbeat_now = Some(SystemTime::now());
         }
 
-        if self.heartbeat_now.unwrap() + self.options.heartbeat_interval > SystemTime::now() {
+        if self.heartbeat_now.unwrap() + self.heartbeat_interval > SystemTime::now() {
             return;
         }
 
@@ -466,7 +426,7 @@ impl RealtimeClient {
                         println!("Possibly malformed payload: {:?}", string_message)
                     }
 
-                    let _ = self.inbound_channel.0.send(message);
+                    let _ = self.inbound_channel.0 .0.send(message);
                     Ok(())
                 }
                 Message::Close(_close_message) => {
@@ -485,7 +445,7 @@ impl RealtimeClient {
             Err(err) => {
                 println!("Socket read error: {:?}", err);
                 self.status = ConnectionState::Reconnect;
-                let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+                let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
                 Err(SocketError::WouldBlock)
             }
         }
@@ -502,7 +462,7 @@ impl RealtimeClient {
 
         // Send to server
         // TODO should drain outbound_channel
-        let message = self.outbound_channel.1.try_recv();
+        let message = self.outbound_channel.0 .1.try_recv();
 
         match message {
             Ok(message) => {
@@ -518,7 +478,7 @@ impl RealtimeClient {
             Err(e) => {
                 println!("outbound error: {:?}", e);
                 self.status = ConnectionState::Reconnect;
-                let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+                let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
                 Err(SocketError::WouldBlock)
             }
         }
@@ -526,7 +486,7 @@ impl RealtimeClient {
 
     fn reconnect(&mut self) {
         self.status = ConnectionState::Reconnect;
-        let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+        let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
     }
 
     pub fn disconnect(&mut self) {
@@ -548,28 +508,21 @@ impl RealtimeClient {
     }
 
     pub fn send(&mut self, msg: RealtimeMessage) -> Result<(), mpsc::SendError<RealtimeMessage>> {
-        self.outbound_channel.0.send(msg)
+        self.outbound_channel.0 .0.send(msg)
     }
 
-    pub fn channel(&mut self, topic: String) -> Result<&mut RealtimeChannel, ChannelCreateError> {
-        let topic = format!("realtime:{}", topic);
-
-        let new_channel = RealtimeChannel::new(self, topic.clone());
-
-        match new_channel {
-            Ok(channel) => {
-                let id = channel.id.clone();
-
-                self.channels.insert(id, channel);
-
-                Ok(self.channels.get_mut(&id).unwrap())
-            }
-            Err(e) => Err(e),
-        }
+    pub(crate) fn add_channel(&mut self, channel: RealtimeChannel) -> Uuid {
+        let id = channel.id.clone();
+        self.channels.insert(channel.id.clone(), channel);
+        id
     }
 
-    pub fn get_channel(&mut self, channel_id: Uuid) -> Option<&mut RealtimeChannel> {
-        self.channels.get_mut(&channel_id)
+    pub fn get_channel_mut(&mut self, channel_id: Uuid) -> &mut RealtimeChannel {
+        self.channels.get_mut(&channel_id).unwrap()
+    }
+
+    pub fn get_channel(&self, channel_id: Uuid) -> &RealtimeChannel {
+        self.channels.get(&channel_id).unwrap()
     }
 
     pub fn get_channels(&self) -> &HashMap<Uuid, RealtimeChannel> {
@@ -637,8 +590,12 @@ impl RealtimeClient {
     }
 
     pub fn block_until_subscribed(&mut self, channel_id: Uuid) -> Result<Uuid, ()> {
-        // TODO work WITH the borrow checker, not against it. Probably some combination of ref mut
-        let channel = self.channels.get_mut(&channel_id).unwrap();
+        // TODO ergonomically this would fit better as a function on RealtimeChannel but borrow
+        // checker
+
+        let channel = self.channels.get_mut(&channel_id);
+
+        let channel = channel.unwrap();
 
         if channel.status == ChannelState::Joined {
             return Ok(channel.id);
@@ -674,12 +631,8 @@ impl RealtimeClient {
     }
 
     pub fn sign_in_with_email_password(&mut self, email: String, password: String) {
-        let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client
-        let url = self
-            .options
-            .auth_url
-            .clone()
-            .unwrap_or(self.endpoint.clone());
+        let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client. or just like write gotrue-rs already
+        let url = self.auth_url.clone().unwrap_or(self.endpoint.clone());
 
         let res = client
             .post(format!("{}/token?grant_type=password", url))
@@ -733,7 +686,7 @@ impl RealtimeClient {
 
         if self.status == ConnectionState::Reconnect {
             self.status = ConnectionState::Reconnect;
-            let _ = self.monitor_channel.0.send(MonitorSignal::Reconnect);
+            let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
             return Err(NextMessageError::SocketError(SocketError::Disconnected));
         }
 
@@ -778,7 +731,7 @@ impl RealtimeClient {
             }
         }
 
-        let message = self.inbound_channel.1.try_recv();
+        let message = self.inbound_channel.0 .1.try_recv();
 
         match message {
             Ok(mut message) => {
@@ -800,6 +753,138 @@ impl RealtimeClient {
             }
             Err(TryRecvError::Empty) => Err(NextMessageError::WouldBlock),
             Err(e) => Err(NextMessageError::TryRecvError(e)),
+        }
+    }
+}
+
+pub struct ReconnectFn(Box<dyn Fn(usize) -> Duration>);
+
+impl Default for ReconnectFn {
+    fn default() -> Self {
+        Self(Box::new(backoff))
+    }
+}
+
+impl Debug for ReconnectFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TODO reconnect fn debug")
+    }
+}
+
+#[derive(Debug)]
+pub struct RealtimeClientBuilder {
+    headers: HeaderMap,
+    params: Option<HashMap<String, String>>,
+    heartbeat_interval: Duration,
+    client_ref: Option<String>,
+    encode: Option<String>, // placeholder
+    decode: Option<String>, // placeholder
+    reconnect_interval: ReconnectFn,
+    reconnect_max_attempts: usize,
+    connection_timeout: Duration,
+    auth_url: Option<String>,
+    endpoint: String,
+    access_token: String,
+}
+
+/// Builds by value / Consuming builder. Cos there's a dyn Fn() in there, i can't clone it
+/// inb4 skill issue
+impl RealtimeClientBuilder {
+    pub fn new(endpoint: String, access_token: String) -> Self {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
+
+        Self {
+            headers,
+            params: Default::default(),
+            heartbeat_interval: Duration::from_secs(29),
+            client_ref: Default::default(),
+            encode: Default::default(),
+            decode: Default::default(),
+            reconnect_interval: ReconnectFn(Box::new(backoff)),
+            reconnect_max_attempts: usize::MAX,
+            connection_timeout: Duration::from_secs(10),
+            auth_url: Default::default(),
+            endpoint,
+            access_token,
+        }
+    }
+
+    pub fn set_headers(mut self, set_headers: HeaderMap) -> Self {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
+        headers.extend(set_headers);
+
+        self.headers = headers;
+
+        self
+    }
+
+    pub fn add_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers.extend(headers);
+        self
+    }
+
+    pub fn params(mut self, params: HashMap<String, String>) -> Self {
+        self.params = Some(params);
+        self
+    }
+
+    pub fn heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn client_ref(mut self, client_ref: String) -> Self {
+        self.client_ref = Some(client_ref);
+        self
+    }
+
+    pub fn encode(mut self, encode: String) -> Self {
+        self.encode = Some(encode);
+        self
+    }
+
+    pub fn decode(mut self, decode: String) -> Self {
+        self.decode = Some(decode);
+        self
+    }
+
+    pub fn reconnect_interval(mut self, reconnect_interval: ReconnectFn) -> Self {
+        self.reconnect_interval = reconnect_interval;
+        self
+    }
+
+    pub fn reconnect_max_attempts(mut self, max_attempts: usize) -> Self {
+        self.reconnect_max_attempts = max_attempts;
+        self
+    }
+
+    pub fn connection_timeout(mut self, timeout: Duration) -> Self {
+        self.connection_timeout = timeout;
+        self
+    }
+
+    pub fn auth_url(mut self, auth_url: String) -> Self {
+        self.auth_url = Some(auth_url);
+        self
+    }
+
+    pub fn build(self) -> RealtimeClient {
+        RealtimeClient {
+            headers: self.headers,
+            params: self.params,
+            heartbeat_interval: self.heartbeat_interval,
+            client_ref: self.client_ref,
+            encode: self.encode,
+            decode: self.decode,
+            reconnect_interval: self.reconnect_interval,
+            reconnect_max_attempts: self.reconnect_max_attempts,
+            connection_timeout: self.connection_timeout,
+            auth_url: self.auth_url,
+            endpoint: self.endpoint,
+            access_token: self.access_token,
+            ..Default::default()
         }
     }
 }

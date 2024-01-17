@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use crate::message::cdc_message_filter::CdcMessageFilter;
 use crate::message::payload::{
-    AccessTokenPayload, JoinConfig, JoinConfigBroadcast, JoinConfigPresence, JoinPayload, Payload,
-    PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
+    AccessTokenPayload, BroadcastConfig, JoinConfig, JoinPayload, Payload, PayloadStatus,
+    PostgresChange, PostgresChangesEvent, PostgresChangesPayload, PresenceConfig,
 };
 use crate::message::realtime_message::{MessageEvent, RealtimeMessage};
 use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
 
-use super::realtime_presence::{PresenceEvent, PresenceState};
+use crate::sync::realtime_presence::{PresenceEvent, PresenceState};
 
 pub type CdcCallback = (CdcMessageFilter, Box<dyn FnMut(&PostgresChangesPayload)>);
 
@@ -51,41 +51,11 @@ pub struct RealtimeChannel {
 // TODO channel options with broadcast + presence settings
 
 impl RealtimeChannel {
-    pub(crate) fn new(
-        client: &mut RealtimeClient,
-        topic: String,
-    ) -> Result<RealtimeChannel, ChannelCreateError> {
-        let id = uuid::Uuid::new_v4();
-
-        let access_token = client.access_token.clone();
-
-        Ok(RealtimeChannel {
-            topic,
-            cdc_callbacks: Default::default(),
-            broadcast_callbacks: Default::default(),
-            tx: client.outbound_channel.0.clone(),
-            status: ChannelState::Closed,
-            join_payload: JoinPayload {
-                access_token: Some(access_token),
-                config: JoinConfig {
-                    presence: JoinConfigPresence {
-                        key: Some("".into()),
-                    },
-                    broadcast: JoinConfigBroadcast {
-                        broadcast_self: true,
-                        ack: true,
-                    },
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            id,
-            presence: RealtimePresence::default(),
-            message_queue: vec![],
-        })
+    pub fn builder(client: &mut RealtimeClient) -> RealtimeChannelBuilder {
+        RealtimeChannelBuilder::new(client)
     }
 
-    pub fn subscribe(&mut self) -> Uuid {
+    pub fn subscribe(&mut self) {
         let join_message = RealtimeMessage {
             event: MessageEvent::PhxJoin,
             topic: self.topic.clone(),
@@ -96,8 +66,6 @@ impl RealtimeChannel {
         self.status = ChannelState::Joining;
 
         let _ = self.tx.send(join_message.into());
-
-        self.id
     }
 
     pub fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
@@ -121,7 +89,7 @@ impl RealtimeChannel {
     }
 
     pub fn set_auth(&mut self, access_token: String) -> Result<(), ChannelSendError> {
-        self.join_payload.access_token = Some(access_token.clone());
+        self.join_payload.access_token = access_token.clone();
 
         if self.status != ChannelState::Joined {
             return Ok(());
@@ -189,63 +157,6 @@ impl RealtimeChannel {
         }
 
         Ok(())
-    }
-
-    // TODO on_message handler for sys messages
-
-    pub fn on_broadcast(
-        &mut self,
-        event: String,
-        callback: impl FnMut(&HashMap<String, Value>) + 'static,
-    ) -> &mut RealtimeChannel {
-        if let None = self.broadcast_callbacks.get_mut(&event) {
-            self.broadcast_callbacks.insert(event.clone(), vec![]);
-        }
-
-        self.broadcast_callbacks
-            .get_mut(&event)
-            .unwrap_or(&mut vec![])
-            .push(Box::new(callback));
-
-        self
-    }
-
-    pub fn on_cdc(
-        &mut self,
-        event: PostgresChangesEvent,
-        filter: CdcMessageFilter,
-        callback: impl FnMut(&PostgresChangesPayload) + 'static,
-    ) -> &mut Self {
-        self.join_payload
-            .config
-            .postgres_changes
-            .push(PostgresChange {
-                event: event.clone(),
-                schema: filter.schema.clone(),
-                table: filter.table.clone().unwrap_or("".into()),
-                filter: filter.filter.clone(),
-            });
-
-        if let None = self.cdc_callbacks.get_mut(&event) {
-            self.cdc_callbacks.insert(event.clone(), vec![]);
-        }
-
-        self.cdc_callbacks
-            .get_mut(&event)
-            .unwrap_or(&mut vec![])
-            .push((filter, Box::new(callback)));
-
-        return self;
-    }
-
-    pub fn on_presence(
-        &mut self,
-        event: PresenceEvent,
-        // TODO callback type alias
-        callback: impl FnMut(String, PresenceState, PresenceState) + 'static,
-    ) -> &mut RealtimeChannel {
-        self.presence.add_callback(event, Box::new(callback));
-        self
     }
 
     pub fn recieve(&mut self, message: RealtimeMessage) {
@@ -326,5 +237,133 @@ impl Debug for RealtimeChannel {
             "RealtimeChannel {{ name: {:?}, callbacks: [TODO DEBUG]}}",
             self.topic
         ))
+    }
+}
+
+pub struct RealtimeChannelBuilder {
+    topic: String,
+    access_token: String,
+    broadcast: BroadcastConfig,
+    presence: PresenceConfig,
+    id: Uuid,
+    postgres_changes: Vec<PostgresChange>,
+    cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
+    broadcast_callbacks: HashMap<String, Vec<Box<dyn FnMut(&HashMap<String, Value>)>>>,
+    presence_callbacks:
+        HashMap<PresenceEvent, Vec<Box<dyn FnMut(String, PresenceState, PresenceState)>>>,
+    tx: mpsc::Sender<RealtimeMessage>,
+}
+
+impl RealtimeChannelBuilder {
+    pub fn new(client: &mut RealtimeClient) -> Self {
+        Self {
+            topic: "no_topic".into(),
+            access_token: client.access_token.clone(),
+            broadcast: Default::default(),
+            presence: Default::default(),
+            id: Uuid::new_v4(),
+            postgres_changes: Default::default(),
+            cdc_callbacks: Default::default(),
+            broadcast_callbacks: Default::default(),
+            presence_callbacks: Default::default(),
+            tx: client.get_channel_tx(),
+        }
+    }
+
+    pub fn topic(mut self, topic: String) -> Self {
+        self.topic = format!("realtime:{}", topic);
+        self
+    }
+
+    pub fn broadcast(mut self, broadcast_config: BroadcastConfig) -> Self {
+        self.broadcast = broadcast_config;
+        self
+    }
+
+    pub fn presence(mut self, presence_config: PresenceConfig) -> Self {
+        self.presence = presence_config;
+        self
+    }
+    pub fn on_cdc(
+        mut self,
+        event: PostgresChangesEvent,
+        filter: CdcMessageFilter,
+        callback: impl FnMut(&PostgresChangesPayload) + 'static,
+    ) -> Self {
+        self.postgres_changes.push(PostgresChange {
+            event: event.clone(),
+            schema: filter.schema.clone(),
+            table: filter.table.clone().unwrap_or("".into()),
+            filter: filter.filter.clone(),
+        });
+
+        if let None = self.cdc_callbacks.get_mut(&event) {
+            self.cdc_callbacks.insert(event.clone(), vec![]);
+        }
+
+        self.cdc_callbacks
+            .get_mut(&event)
+            .unwrap_or(&mut vec![])
+            .push((filter, Box::new(callback)));
+
+        self
+    }
+
+    pub fn on_presence(
+        mut self,
+        event: PresenceEvent,
+        // TODO callback type alias
+        callback: impl FnMut(String, PresenceState, PresenceState) + 'static,
+    ) -> Self {
+        if let None = self.presence_callbacks.get_mut(&event) {
+            self.presence_callbacks.insert(event.clone(), vec![]);
+        }
+
+        self.presence_callbacks
+            .get_mut(&event)
+            .unwrap_or(&mut vec![])
+            .push(Box::new(callback));
+
+        self
+    }
+
+    pub fn on_broadcast(
+        mut self,
+        event: String,
+        callback: impl FnMut(&HashMap<String, Value>) + 'static,
+    ) -> Self {
+        if let None = self.broadcast_callbacks.get_mut(&event) {
+            self.broadcast_callbacks.insert(event.clone(), vec![]);
+        }
+
+        self.broadcast_callbacks
+            .get_mut(&event)
+            .unwrap_or(&mut vec![])
+            .push(Box::new(callback));
+
+        self
+    }
+
+    // TODO on_message handler for sys messages
+
+    pub fn build(self, client: &mut RealtimeClient) -> Uuid {
+        client.add_channel(RealtimeChannel {
+            topic: self.topic,
+            cdc_callbacks: self.cdc_callbacks,
+            broadcast_callbacks: self.broadcast_callbacks,
+            tx: self.tx,
+            status: ChannelState::Closed,
+            id: self.id,
+            join_payload: JoinPayload {
+                config: JoinConfig {
+                    broadcast: self.broadcast,
+                    presence: self.presence,
+                    postgres_changes: self.postgres_changes,
+                },
+                access_token: self.access_token,
+            },
+            presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
+            message_queue: vec![],
+        })
     }
 }
