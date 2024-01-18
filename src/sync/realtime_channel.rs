@@ -4,8 +4,9 @@ use uuid::Uuid;
 use crate::message::{
     cdc_message_filter::CdcMessageFilter,
     payload::{
-        AccessTokenPayload, BroadcastConfig, JoinConfig, JoinPayload, Payload, PayloadStatus,
-        PostgresChange, PostgresChangesEvent, PostgresChangesPayload, PresenceConfig,
+        AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload, Payload,
+        PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
+        PresenceConfig,
     },
     realtime_message::{MessageEvent, RealtimeMessage},
 };
@@ -148,6 +149,10 @@ impl RealtimeChannel {
         self.message_queue.push(message);
 
         self.drain_queue()
+    }
+
+    pub fn broadcast(&mut self, payload: BroadcastPayload) -> Result<(), ChannelSendError> {
+        self.send(RealtimeMessage::broadcast(payload.event, payload.payload))
     }
 
     pub(crate) fn drain_queue(&mut self) -> Result<(), ChannelSendError> {

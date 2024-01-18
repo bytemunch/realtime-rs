@@ -51,8 +51,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] Refactor all the stupid out
     > - [ ] Better client state management
  - [ ] REST channel sending
+ - [ ] Test TLS websockets
  - [ ] Lock down a clean API
  - [ ] Docs
+ - [ ] Remove unused `derive`s
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
  - [ ] Async client + do it all again

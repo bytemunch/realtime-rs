@@ -458,9 +458,7 @@ impl RealtimeClient {
             .messages_this_second
             .clone() // TODO do i need this clone? can i mutate in-place?
             .into_iter()
-            .filter(|st| {
-                now.duration_since(*st).unwrap_or(Duration::default()) < Duration::from_secs(1)
-            })
+            .filter(|st| now.duration_since(*st).unwrap_or_default() < Duration::from_secs(1))
             .collect();
 
         if self.messages_this_second.len() >= self.max_events_per_second {

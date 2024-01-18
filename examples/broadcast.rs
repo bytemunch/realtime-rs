@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env};
 
 use realtime_rs::{
-    message::realtime_message::RealtimeMessage,
+    message::payload::BroadcastPayload,
     sync::realtime_client::{NextMessageError, RealtimeClient},
 };
 
@@ -31,9 +31,9 @@ fn main() {
     let mut payload = HashMap::new();
     payload.insert("message".into(), "hello, broadcast!".into());
 
-    let message = RealtimeMessage::broadcast("banana".into(), payload);
+    let message = BroadcastPayload::new("banana".into(), payload);
 
-    let _ = client.get_channel_mut(channel_b).send(message);
+    let _ = client.get_channel_mut(channel_b).broadcast(message);
 
     loop {
         match client.next_message() {
