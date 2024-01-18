@@ -134,6 +134,7 @@ pub struct RealtimeClient {
     channels: HashMap<Uuid, RealtimeChannel>,
     pub status: ConnectionState,
     pub access_token: String,
+    messages_this_second: Vec<SystemTime>,
     // mpsc
     inbound_channel: MessageChannel,
     pub(crate) outbound_channel: MessageChannel,
@@ -156,6 +157,7 @@ pub struct RealtimeClient {
     connection_timeout: Duration,
     auth_url: Option<String>,
     endpoint: String,
+    max_events_per_second: usize,
 }
 
 impl Debug for RealtimeClient {
@@ -449,8 +451,25 @@ impl RealtimeClient {
             return Err(SocketError::NoWrite);
         }
 
+        // Throttling
+        let now = SystemTime::now();
+
+        self.messages_this_second = self
+            .messages_this_second
+            .clone() // TODO do i need this clone? can i mutate in-place?
+            .into_iter()
+            .filter(|st| {
+                now.duration_since(*st).unwrap_or(Duration::default()) < Duration::from_secs(1)
+            })
+            .collect();
+
+        if self.messages_this_second.len() >= self.max_events_per_second {
+            return Err(SocketError::WouldBlock);
+        }
+
         // Send to server
         // TODO should drain outbound_channel
+        // TODO drain should respect throttling
         let message = self.outbound_channel.0 .1.try_recv();
 
         match message {
@@ -458,6 +477,7 @@ impl RealtimeClient {
                 let raw_message = serde_json::to_string(&message);
                 println!("[SEND] {:?}", raw_message);
                 let _ = socket.send(message.into());
+                self.messages_this_second.push(now);
                 Ok(())
             }
             Err(TryRecvError::Empty) => {
@@ -704,6 +724,7 @@ impl RealtimeClient {
 
         match self.write_socket() {
             Ok(()) => {}
+            Err(SocketError::WouldBlock) => {}
             Err(e) => {
                 self.reconnect();
                 return Err(NextMessageError::SocketError(e));
@@ -772,6 +793,7 @@ pub struct RealtimeClientBuilder {
     auth_url: Option<String>,
     endpoint: String,
     access_token: String,
+    max_events_per_second: usize,
 }
 
 /// Builds by value / Consuming builder. Cos there's a dyn Fn() in there, i can't clone it
@@ -794,6 +816,7 @@ impl RealtimeClientBuilder {
             auth_url: Default::default(),
             endpoint,
             access_token,
+            max_events_per_second: 10,
         }
     }
 
@@ -838,6 +861,8 @@ impl RealtimeClientBuilder {
     }
 
     pub fn reconnect_interval(mut self, reconnect_interval: ReconnectFn) -> Self {
+        // TODO minimum interval to prevent 10000000 requests in seconds
+        // then again it takes a bit of work to make that mistake?
         self.reconnect_interval = reconnect_interval;
         self
     }
@@ -848,12 +873,25 @@ impl RealtimeClientBuilder {
     }
 
     pub fn connection_timeout(mut self, timeout: Duration) -> Self {
+        // 1 sec min timeout
+        // TODO document the minimum timeout
+        let timeout = if timeout < Duration::from_secs(1) {
+            Duration::from_secs(1)
+        } else {
+            timeout
+        };
+
         self.connection_timeout = timeout;
         self
     }
 
     pub fn auth_url(mut self, auth_url: String) -> Self {
         self.auth_url = Some(auth_url);
+        self
+    }
+
+    pub fn max_events_per_second(mut self, count: usize) -> Self {
+        self.max_events_per_second = count;
         self
     }
 
@@ -871,6 +909,7 @@ impl RealtimeClientBuilder {
             auth_url: self.auth_url,
             endpoint: self.endpoint,
             access_token: self.access_token,
+            max_events_per_second: self.max_events_per_second,
             ..Default::default()
         }
     }
