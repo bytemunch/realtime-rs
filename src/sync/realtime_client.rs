@@ -11,13 +11,13 @@ use std::{
     time::Duration,
 };
 
-use reqwest::header::CONTENT_TYPE;
+use native_tls::TlsConnector;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tungstenite::Message;
+use tungstenite::{client, Message};
 use tungstenite::{
     client::{uri_mode, IntoClientRequest},
-    client_tls,
     handshake::MidHandshake,
     http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, Uri},
     stream::{MaybeTlsStream, Mode, NoDelay},
@@ -198,6 +198,25 @@ impl RealtimeClient {
             Err(_e) => return Err(ConnectError::BadUri),
         };
 
+        // TODO REFAC tidy
+        let ws_scheme = match uri.scheme_str() {
+            Some(scheme) => {
+                if scheme == "http" {
+                    "ws"
+                } else {
+                    "wss"
+                }
+            }
+            None => "ws",
+        };
+
+        let uri = Uri::builder()
+            .scheme(ws_scheme)
+            .authority(uri.authority().unwrap().clone())
+            .path_and_query(uri.path_and_query().unwrap().clone())
+            .build()
+            .unwrap();
+
         let Ok(mut request) = uri.clone().into_client_request() else {
             return Err(ConnectError::BadUri);
         };
@@ -221,7 +240,7 @@ impl RealtimeClient {
             return Err(ConnectError::BadUri);
         };
 
-        let Some(host) = request.uri().host() else {
+        let Some(host) = uri.host() else {
             return Err(ConnectError::BadHost);
         };
 
@@ -258,11 +277,30 @@ impl RealtimeClient {
             return Err(ConnectError::NoDelayError);
         };
 
-        let Ok(()) = stream.set_nonblocking(true) else {
-            return Err(ConnectError::NonblockingError);
+        let maybe_tls = match mode {
+            Mode::Tls => {
+                let connector = TlsConnector::new().expect("No TLS tings");
+
+                let connected_stream = connector
+                    .connect(host, stream.try_clone().expect("noclone"))
+                    .unwrap();
+
+                stream
+                    .set_nonblocking(true)
+                    .expect("blocking mode oh nooooo");
+
+                MaybeTlsStream::NativeTls(connected_stream)
+            }
+            Mode::Plain => {
+                stream
+                    .set_nonblocking(true)
+                    .expect("blocking mode oh nooooo");
+
+                MaybeTlsStream::Plain(stream)
+            }
         };
 
-        let conn: Result<(WebSocket, Response), Error> = match client_tls(request, stream) {
+        let conn: Result<(WebSocket, Response), Error> = match client(request, maybe_tls) {
             Ok(stream) => {
                 self.reconnect_attempts = 0;
                 Ok(stream)
@@ -641,17 +679,37 @@ impl RealtimeClient {
         let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client. or just like write gotrue-rs already
         let url = self.auth_url.clone().unwrap_or(self.endpoint.clone());
 
+        let url = format!("{}/auth/v1", url);
+
         let res = client
             .post(format!("{}/token?grant_type=password", url))
             .header(CONTENT_TYPE, "application/json")
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token.clone()),
+            )
+            .header("apikey", self.access_token.clone())
             .body(json!({"email": email, "password": password}).to_string())
             .send();
 
         if let Ok(res) = res {
-            let res: AuthResponse = res.json().unwrap();
+            match res.json::<AuthResponse>() {
+                Ok(res) => {
+                    self.set_auth(res.access_token);
+                    println!("Login success");
+                    return;
+                }
+                Err(e) => {
+                    println!("Login failed! Bad login? {:?}", e);
+                    return;
+                }
+            }
 
-            self.set_auth(res.access_token);
+            // TODO error, bad login
         }
+        println!("Login failed! Malformed data?");
+        return;
+        // TODO error, malformed auth packet / url
     }
 
     pub fn set_auth(&mut self, access_token: String) {

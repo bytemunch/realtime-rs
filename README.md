@@ -19,6 +19,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Configurable reconnect max attempts
  - [x] Auto reconnect
  - [x] Configurable client-side message throttling
+ - [x] TLS websockets
 
 #### Channels
 
@@ -43,6 +44,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ### TODOs
 
+ - [ ] `Rustls` compatibility
  - [ ] Example: CLI broadcast chatroom with active user list (accessed with a `/online` command)
  - [ ] Example: Pull data out of closure and modify state in a higher scope
  - [ ] Example: Act on system messages
@@ -50,14 +52,13 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] Middleware filtering by `MessageEvent`
  - [ ] Refactor all the stupid out
     > - [ ] Better client state management
- - [ ] REST channel sending
- - [ ] Test TLS websockets
  - [ ] Lock down a clean API
  - [ ] Docs
  - [ ] Remove unused `derive`s
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
- - [ ] Async client + do it all again
+ - [ ] Async client
+ - [ ] REST channel sending
 
 # Contributing
 
