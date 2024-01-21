@@ -28,11 +28,18 @@ use uuid::Uuid;
 use crate::message::payload::Payload;
 use crate::message::realtime_message::RealtimeMessage;
 use crate::sync::realtime_channel::{ChannelState, RealtimeChannel};
+use crate::DEBUG;
 
 use super::realtime_channel::RealtimeChannelBuilder;
 
 pub type Response = HttpResponse<Option<Vec<u8>>>;
 pub type WebSocket = WebSocketWrapper<MaybeTlsStream<TcpStream>>;
+
+#[derive(PartialEq, Debug)]
+pub enum AuthError {
+    BadLogin,
+    MalformedData,
+}
 
 #[derive(PartialEq, Debug, Default)]
 pub enum ConnectionState {
@@ -232,7 +239,9 @@ impl RealtimeClient {
         let xci: HeaderValue = "realtime-rs/0.1.0".to_string().parse().unwrap();
         headers.insert("X-Client-Info", xci);
 
-        println!("Connecting... Req: {:?}\n", request);
+        if DEBUG {
+            println!("Connecting... Req: {:?}\n", request);
+        }
 
         let uri = request.uri();
 
@@ -407,7 +416,9 @@ impl RealtimeClient {
                             Ok(())
                         }
                         Err(e) => {
-                            println!("reconnect error: {:?}", e);
+                            if DEBUG {
+                                println!("reconnect error: {:?}", e);
+                            }
                             self.status = ConnectionState::Reconnect;
                             Err(MonitorError::ReconnectError)
                         }
@@ -449,10 +460,14 @@ impl RealtimeClient {
                     let message: RealtimeMessage =
                         serde_json::from_str(&string_message).expect("Deserialization error: ");
 
-                    println!("[RECV] {:?}", message);
+                    if DEBUG {
+                        println!("[RECV] {:?}", message);
+                    }
 
                     if let Payload::Empty {} = message.payload {
-                        println!("Possibly malformed payload: {:?}", string_message)
+                        if DEBUG {
+                            println!("Possibly malformed payload: {:?}", string_message)
+                        }
                     }
 
                     let _ = self.inbound_channel.0 .0.send(message);
@@ -472,7 +487,9 @@ impl RealtimeClient {
                 Ok(())
             }
             Err(err) => {
-                println!("Socket read error: {:?}", err);
+                if DEBUG {
+                    println!("Socket read error: {:?}", err);
+                }
                 self.status = ConnectionState::Reconnect;
                 let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
                 Err(SocketError::WouldBlock)
@@ -511,7 +528,9 @@ impl RealtimeClient {
         match message {
             Ok(message) => {
                 let raw_message = serde_json::to_string(&message);
-                println!("[SEND] {:?}", raw_message);
+                if DEBUG {
+                    println!("[SEND] {:?}", raw_message);
+                }
                 let _ = socket.send(message.into());
                 self.messages_this_second.push(now);
                 Ok(())
@@ -521,7 +540,9 @@ impl RealtimeClient {
                 Ok(())
             }
             Err(e) => {
-                println!("outbound error: {:?}", e);
+                if DEBUG {
+                    println!("outbound error: {:?}", e);
+                }
                 self.status = ConnectionState::Reconnect;
                 let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
                 Err(SocketError::WouldBlock)
@@ -544,12 +565,16 @@ impl RealtimeClient {
         self.status = ConnectionState::Closed;
 
         let Some(ref mut socket) = self.socket else {
-            println!("Already disconnected. {:?}", self.status);
+            if DEBUG {
+                println!("Already disconnected. {:?}", self.status);
+            }
             return;
         };
 
         let _ = socket.close(None);
-        println!("Client disconnected. {:?}", self.status);
+        if DEBUG {
+            println!("Client disconnected. {:?}", self.status);
+        }
     }
 
     pub fn send(&mut self, msg: RealtimeMessage) -> Result<(), mpsc::SendError<RealtimeMessage>> {
@@ -620,13 +645,17 @@ impl RealtimeClient {
                     }
                     Err(e) => {
                         // TODO error handling
-                        println!("Unsubscribe error: {:?}", e);
+                        if DEBUG {
+                            println!("Unsubscribe error: {:?}", e);
+                        }
                     }
                 }
             }
 
             if all_channels_closed {
-                println!("All channels closed!");
+                if DEBUG {
+                    println!("All channels closed!");
+                }
                 break;
             }
         }
@@ -653,7 +682,9 @@ impl RealtimeClient {
         loop {
             match self.next_message() {
                 Ok(topic) => {
-                    println!("[Blocking Subscribe] Message forwarded to {:?}", topic)
+                    if DEBUG {
+                        println!("[Blocking Subscribe] Message forwarded to {:?}", topic)
+                    }
                 }
                 Err(NextMessageError::WouldBlock) => {}
                 Err(_e) => {
@@ -675,7 +706,12 @@ impl RealtimeClient {
         Ok(channel_id)
     }
 
-    pub fn sign_in_with_email_password(&mut self, email: String, password: String) {
+    // TODO static version of this that just returns the JWT, so client can be signed in from init
+    pub fn sign_in_with_email_password(
+        &mut self,
+        email: String,
+        password: String,
+    ) -> Result<(), AuthError> {
         let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client. or just like write gotrue-rs already
         let url = self.auth_url.clone().unwrap_or(self.endpoint.clone());
 
@@ -696,20 +732,17 @@ impl RealtimeClient {
             match res.json::<AuthResponse>() {
                 Ok(res) => {
                     self.set_auth(res.access_token);
-                    println!("Login success");
-                    return;
+                    if DEBUG {
+                        println!("Login success");
+                    }
+                    return Ok(());
                 }
-                Err(e) => {
-                    println!("Login failed! Bad login? {:?}", e);
-                    return;
+                Err(_e) => {
+                    return Err(AuthError::BadLogin);
                 }
             }
-
-            // TODO error, bad login
         }
-        println!("Login failed! Malformed data?");
-        return;
-        // TODO error, malformed auth packet / url
+        Err(AuthError::MalformedData)
     }
 
     pub fn set_auth(&mut self, access_token: String) {

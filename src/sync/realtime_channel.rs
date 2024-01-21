@@ -1,14 +1,17 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::message::{
-    cdc_message_filter::CdcMessageFilter,
-    payload::{
-        AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload, Payload,
-        PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
-        PresenceConfig,
+use crate::{
+    message::{
+        cdc_message_filter::CdcMessageFilter,
+        payload::{
+            AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload,
+            Payload, PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
+            PresenceConfig,
+        },
+        realtime_message::{MessageEvent, RealtimeMessage},
     },
-    realtime_message::{MessageEvent, RealtimeMessage},
+    DEBUG,
 };
 
 use crate::sync::{
@@ -224,7 +227,9 @@ impl RealtimeChannel {
                 if let Some(message_ref) = message.message_ref {
                     if message_ref == self.id.to_string() {
                         self.status = ChannelState::Closed;
-                        println!("Channel Closed! {:?}", self.id);
+                        if DEBUG {
+                            println!("Channel Closed! {:?}", self.id);
+                        }
                     }
                 }
             }
@@ -233,7 +238,9 @@ impl RealtimeChannel {
                     == format!("{}+leave", self.id)
                 {
                     self.status = ChannelState::Closed;
-                    println!("Channel Closed! {:?}", self.id);
+                    if DEBUG {
+                        println!("Channel Closed! {:?}", self.id);
+                    }
                 }
             }
             _ => {}

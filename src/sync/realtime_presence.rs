@@ -22,12 +22,28 @@ pub type PresenceCallback = Box<dyn FnMut(String, PresenceState, PresenceState)>
 //}
 //
 // triple nested hashmap, fantastic. gonna need to write some helper functions for this one
-pub type PresenceStateInner = HashMap<String, HashMap<String, HashMap<String, Value>>>;
+pub type PresenceStateInner = HashMap<String, PhxMap>;
+
+pub type PhxMap = HashMap<String, StateData>;
+
+pub type StateData = HashMap<String, Value>;
 
 /// HashMap<id, HashMap<phx_ref, HashMap<key, value>>>
 /// { [id]: { [ref]: { [key]: value } } }
 #[derive(Default, Clone, Debug)]
-pub struct PresenceState(PresenceStateInner);
+pub struct PresenceState(pub PresenceStateInner);
+
+impl PresenceState {
+    pub fn get_phx_map(&self) -> PhxMap {
+        let mut new_map = HashMap::new();
+        for (_id, map) in self.0.clone() {
+            for (phx_id, state_data) in map {
+                new_map.insert(phx_id, state_data);
+            }
+        }
+        new_map
+    }
+}
 
 type PresenceIteratorItem = (String, HashMap<String, HashMap<String, Value>>);
 
@@ -199,7 +215,7 @@ impl RealtimePresence {
                 .get_mut(&PresenceEvent::Leave)
                 .unwrap_or(&mut vec![])
             {
-                cb.as_mut()(id.clone(), self.state.clone(), diff.clone().joins);
+                cb.as_mut()(id.clone(), self.state.clone(), diff.clone().leaves);
             }
 
             self.state.0.remove(&id);

@@ -41,11 +41,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
    > May be useless
  - [x] Placeholder function for email/password auth (immediately deprecated in favour of gotrue-rs or auth-rs or whatever it will be called.)
  - [x] Builder patterns for client and channel
+ - [x] Example: CLI broadcast chatroom with active user list (accessed with a `/online` command)
 
 ### TODOs
 
- - [ ] `Rustls` compatibility
- - [ ] Example: CLI broadcast chatroom with active user list (accessed with a `/online` command)
  - [ ] Example: Pull data out of closure and modify state in a higher scope
  - [ ] Example: Act on system messages
  - [ ] Middleware example (?) try using current API see if middleware needed

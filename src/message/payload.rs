@@ -153,8 +153,8 @@ pub struct JoinConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct BroadcastConfig {
     #[serde(rename = "self")]
-    pub(crate) broadcast_self: bool,
-    pub(crate) ack: bool,
+    pub broadcast_self: bool,
+    pub ack: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

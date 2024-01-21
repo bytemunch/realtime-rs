@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::message::{payload::Payload, realtime_message::RealtimeMessage};
+use crate::{
+    message::{payload::Payload, realtime_message::RealtimeMessage},
+    DEBUG,
+};
 
 // TODO builder pattern for filter?
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -31,13 +34,17 @@ impl CdcMessageFilter {
 impl CdcMessageFilter {
     pub fn check(&self, message: RealtimeMessage) -> Option<RealtimeMessage> {
         let Payload::PostgresChanges(payload) = &message.payload else {
-            println!("Dropping non CDC message: {:?}", message);
+            if DEBUG {
+                println!("Dropping non CDC message: {:?}", message);
+            }
             return None;
         };
 
         if let Some(table) = &self.table {
             if table != &payload.data.table {
-                println!("Dropping mismatched table message: {:?}", message);
+                if DEBUG {
+                    println!("Dropping mismatched table message: {:?}", message);
+                }
                 return None;
             }
         }
@@ -50,7 +57,9 @@ impl CdcMessageFilter {
             return None;
         }
 
-        println!("Dropping mismatched CDC event: {:?}", message);
+        if DEBUG {
+            println!("Dropping mismatched CDC event: {:?}", message);
+        }
 
         Some(message)
     }
