@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     env,
     io::{self, stdout, Write},
+    rc::Rc,
     sync::mpsc::{self, Receiver},
     thread::{self, sleep},
     time::Duration,
@@ -26,18 +28,17 @@ struct ChatMessage {
 
 const LOCAL: bool = false;
 // Chatroom using presence and broadcast
-
 fn main() {
     let mut email = String::new();
     let mut password = String::new();
-    let mut alias = String::new();
+    let alias = Rc::new(RefCell::new(String::new()));
 
     println!("Welcome to SupaChat!\n");
 
     if DEBUG {
         email = String::from("test@example.com");
         password = String::from("password");
-        alias = String::from("test");
+        alias.replace(String::from("test"));
     } else {
         println!("Enter email: (blank for anon)");
         io::stdin()
@@ -56,11 +57,12 @@ fn main() {
         password = password.trim().into();
 
         println!("Choose your alias: ");
+        let mut buf = String::new();
         io::stdin()
-            .read_line(&mut alias)
+            .read_line(&mut buf)
             .expect("couldn't parse alias");
 
-        alias = alias.trim().into();
+        alias.replace(buf.trim().into());
     }
 
     let mut url = "http://127.0.0.1:54321".into();
@@ -96,22 +98,13 @@ fn main() {
         }
     }
 
-    println!(
-        "You are now chatting as [{}]\n\nCommands:\n\t/online:\t\tShow online users\n",
-        alias
-    );
+    println!("You are now chatting as [{}]\n\nCommands:\n\t/online\t\t:Show online users\n\t/alias NAME\t:Change your alias\n", alias.borrow());
 
-    // BORROW CHECKERRRRRRRRRRRRRR
-    // TODO superstruct to hold alias and create prompt?
-    // orrrr maybe a static function to print prompt, alias as arg
+    let on_broadcast_alias = alias.clone();
+    let on_join_alias = alias.clone();
+    let on_leave_alias = alias.clone();
 
-    let prompt = format!("[{}]: ", alias);
-    let my_name = alias.clone();
-    let my_prompt = prompt.clone();
-    let my_my_prompt = prompt.clone();
-    let my_my_my_prompt = prompt.clone();
-
-    print!("\n{}", prompt);
+    print!("\n{}", prompt(alias.borrow().as_str()));
     stdout().flush().unwrap();
 
     let channel_id = client
@@ -140,11 +133,15 @@ fn main() {
             };
 
             print!("\r[{}]: {}", recieved.author, recieved.message);
-            if recieved.author == my_name {
+            if recieved.author == *on_broadcast_alias.borrow() {
                 // TODO not repeat, count buffer
-                print!("\r{}\r{}", " ".repeat(50), my_prompt);
+                print!(
+                    "\r{}\r{}",
+                    " ".repeat(50),
+                    prompt(on_broadcast_alias.borrow().as_str())
+                );
             } else {
-                print!("\n{}", my_prompt);
+                print!("\n{}", prompt(on_broadcast_alias.borrow().as_str()));
             }
             stdout().flush().unwrap();
         })
@@ -154,17 +151,18 @@ fn main() {
                     "\r{} joined the chatroom.",
                     serde_json::from_value::<String>(data.get("alias").unwrap().clone()).unwrap()
                 );
-                print!("\n{}", my_my_prompt);
+                print!("\n{}", prompt(on_join_alias.borrow().as_str()));
                 stdout().flush().unwrap();
             }
         })
         .on_presence(PresenceEvent::Leave, move |_id, _state, leaves| {
+            let prompt = |alias| format!("[{}]: ", alias);
             for (_id, data) in leaves.get_phx_map() {
                 print!(
                     "\r{} has gone to touch grass.",
                     serde_json::from_value::<String>(data.get("alias").unwrap().clone()).unwrap()
                 );
-                print!("\n{}", my_my_my_prompt);
+                print!("\n{}", prompt(on_leave_alias.borrow()));
                 stdout().flush().unwrap();
             }
         })
@@ -173,7 +171,10 @@ fn main() {
     let _ = client.block_until_subscribed(channel_id);
 
     let mut state_data = HashMap::new();
-    state_data.insert("alias".into(), alias.clone().into());
+    state_data.insert(
+        "alias".into(),
+        serde_json::Value::String(alias.borrow().clone()),
+    );
     client.get_channel_mut(channel_id).track(state_data);
 
     let stdin_rx = spawn_stdin_channel();
@@ -215,8 +216,34 @@ fn main() {
                                 );
                             }
 
-                            print!("\r{}\r{}", " ".repeat(50), prompt);
+                            print!("\r{}\r{}", " ".repeat(50), prompt(alias.borrow().as_str()));
                             stdout().flush().unwrap();
+                        }
+                        _ => {
+                            println!("Couldn't find command {}", command);
+                        }
+                    }
+
+                    continue;
+                };
+
+                let regex = Regex::new(r"(\/)([\S]*)\s([\S]*)$").unwrap();
+
+                if let Some(captures) = regex.captures(input.as_str()) {
+                    let (_, [_, command, arg]) = captures.extract();
+
+                    match command {
+                        "alias" => {
+                            alias.replace(arg.to_string());
+
+                            let mut state_data = HashMap::new();
+                            state_data.insert(
+                                "alias".into(),
+                                serde_json::to_value(alias.borrow().clone()).unwrap(),
+                            );
+                            client.get_channel_mut(channel_id).track(state_data);
+
+                            println!("\rYou are now chatting as [{}]", alias.borrow());
                         }
                         _ => {
                             println!("Couldn't find command {}", command);
@@ -228,7 +255,7 @@ fn main() {
 
                 let mut payload = HashMap::new();
                 payload.insert("message".into(), input.trim().into());
-                payload.insert("author".into(), alias.trim().into());
+                payload.insert("author".into(), alias.borrow().trim().into());
 
                 let payload = BroadcastPayload::new("supachat".into(), payload);
 
@@ -259,4 +286,8 @@ fn spawn_stdin_channel() -> Receiver<String> {
         stdout().flush().unwrap();
     });
     rx
+}
+
+fn prompt(alias: &str) -> String {
+    format!("[{}]: ", alias)
 }

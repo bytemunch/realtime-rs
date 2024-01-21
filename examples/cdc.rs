@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env};
+use std::{cell::RefCell, collections::HashMap, env, rc::Rc};
 
 use realtime_rs::{
     message::{cdc_message_filter::CdcMessageFilter, payload::PostgresChangesEvent},
@@ -11,6 +11,8 @@ fn main() {
     let mut url = "http://127.0.0.1:54321".into();
     let mut anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     let mut auth_url = "http://192.168.64.6:9999".into();
+
+    let event_counter = Rc::new(RefCell::new(0));
 
     if !LOCAL {
         url = format!(
@@ -30,7 +32,14 @@ fn main() {
         Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
     };
 
-    client.sign_in_with_email_password("test@example.com".into(), "password".into());
+    let _ = client.sign_in_with_email_password("test@example.com".into(), "password".into());
+
+    let rc = Rc::clone(&event_counter);
+
+    let on_cdc = move |msg: &_| {
+        rc.replace_with(|&mut count| count + 1);
+        println!("Event #{} | Channel 1:\n{:?}", rc.borrow(), msg);
+    };
 
     let channel_id = client
         .channel("topic".into())
@@ -41,7 +50,7 @@ fn main() {
                 table: Some("todos".into()),
                 ..Default::default()
             },
-            |msg| println!("Channel 1:\n{:?}", msg),
+            on_cdc,
         )
         .presence(realtime_rs::message::payload::PresenceConfig {
             key: Some("test_key".into()),
