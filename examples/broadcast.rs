@@ -6,23 +6,26 @@ use realtime_rs::{
 };
 
 fn main() {
-    let url = "ws://127.0.0.1:54321".into();
+    let url = "http://127.0.0.1:54321".into();
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
+    let auth_url = "http://192.168.64.6:9999".into();
 
-    let mut client = RealtimeClient::builder(url, anon_key).build();
+    let mut client = RealtimeClient::builder(url, anon_key)
+        .auth_url(auth_url)
+        .build();
 
     let _ = client.connect();
 
     let channel_a = client
-        .channel("room-1".into())
-        .on_broadcast("banana".into(), |msg| {
+        .channel("topic".into())
+        .on_broadcast("subtopic".into(), |msg| {
             println!("[BROADCAST RECV] {:?}", msg);
         })
         .build(&mut client);
 
     let _channel_a = client.block_until_subscribed(channel_a).unwrap();
 
-    let channel_b = client.channel("room-1".into()).build(&mut client);
+    let channel_b = client.channel("topic".into()).build(&mut client);
     let channel_b = client.block_until_subscribed(channel_b).unwrap();
 
     // Send message
@@ -31,9 +34,12 @@ fn main() {
     let mut payload = HashMap::new();
     payload.insert("message".into(), "hello, broadcast!".into());
 
-    let message = BroadcastPayload::new("banana".into(), payload);
+    let message = BroadcastPayload::new("subtopic".into(), payload);
 
-    let _ = client.get_channel_mut(channel_b).broadcast(message);
+    let _ = client
+        .get_channel_mut(channel_b)
+        .unwrap()
+        .broadcast(message);
 
     loop {
         match client.next_message() {

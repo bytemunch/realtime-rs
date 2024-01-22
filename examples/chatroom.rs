@@ -175,7 +175,10 @@ fn main() {
         "alias".into(),
         serde_json::Value::String(alias.borrow().clone()),
     );
-    client.get_channel_mut(channel_id).track(state_data);
+    client
+        .get_channel_mut(channel_id)
+        .unwrap()
+        .track(state_data);
 
     let stdin_rx = spawn_stdin_channel();
 
@@ -204,6 +207,7 @@ fn main() {
 
                             for (_id, data) in client
                                 .get_channel(channel_id)
+                                .unwrap()
                                 .presence_state()
                                 .get_phx_map()
                             {
@@ -241,7 +245,10 @@ fn main() {
                                 "alias".into(),
                                 serde_json::to_value(alias.borrow().clone()).unwrap(),
                             );
-                            client.get_channel_mut(channel_id).track(state_data);
+                            client
+                                .get_channel_mut(channel_id)
+                                .unwrap()
+                                .track(state_data);
 
                             println!("\rYou are now chatting as [{}]", alias.borrow());
                         }
@@ -259,7 +266,10 @@ fn main() {
 
                 let payload = BroadcastPayload::new("supachat".into(), payload);
 
-                let _ = client.get_channel_mut(channel_id).broadcast(payload);
+                let _ = client
+                    .get_channel_mut(channel_id)
+                    .unwrap()
+                    .broadcast(payload);
             }
             Err(_e) => {}
         }

@@ -5,7 +5,7 @@ use realtime_rs::{
     sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
 };
 
-const LOCAL: bool = false;
+const LOCAL: bool = true;
 
 fn main() {
     let mut url = "http://127.0.0.1:54321".into();
@@ -59,10 +59,13 @@ fn main() {
 
     let _ = client.block_until_subscribed(channel_id);
 
-    client.get_channel_mut(channel_id).track(HashMap::new());
+    client
+        .get_channel_mut(channel_id)
+        .unwrap()
+        .track(HashMap::new());
 
     loop {
-        if client.status == ConnectionState::Closed {
+        if client.get_status() == ConnectionState::Closed {
             break;
         }
 
@@ -71,8 +74,8 @@ fn main() {
                 println!("Message forwarded to {:?}", topic)
             }
             Err(NextMessageError::WouldBlock) => {}
-            Err(_e) => {
-                //println!("NextMessageError: {:?}", e)
+            Err(e) => {
+                panic!("NextMessageError: {:?}", e);
             }
         }
     }

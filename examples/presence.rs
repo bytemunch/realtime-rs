@@ -7,7 +7,7 @@ use realtime_rs::sync::{
 };
 
 fn main() {
-    let url = "ws://127.0.0.1:54321".into();
+    let url = "http://127.0.0.1:54321".into();
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
     let mut client = RealtimeClient::builder(url, anon_key).build();
@@ -34,12 +34,12 @@ fn main() {
         })
         .build(client);
 
-    client.get_channel_mut(channel_id).subscribe();
+    client.get_channel_mut(channel_id).unwrap().subscribe();
 
     let mut sent_once = false;
 
     loop {
-        if client.status == ConnectionState::Closed {
+        if client.get_status() == ConnectionState::Closed {
             break;
         }
 
@@ -57,9 +57,9 @@ fn main() {
             continue;
         }
 
-        let channel = client.get_channel_mut(channel_id);
+        let channel = client.get_channel_mut(channel_id).unwrap();
 
-        if channel.status == ChannelState::Joined {
+        if channel.get_status() == ChannelState::Joined {
             channel.track(presence_payload.clone());
             sent_once = true;
         }

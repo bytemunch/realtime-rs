@@ -20,6 +20,8 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] Auto reconnect
  - [x] Configurable client-side message throttling
  - [x] TLS websockets
+ - [x] Docs
+    > - [x] Make `pub(crate)` anything that doesn't need to be user facing
 
 #### Channels
 
@@ -47,18 +49,31 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ### TODOs
 
- - [ ] Example: Act on system messages
- - [ ] Middleware example (?) try using current API see if middleware needed
- - [ ] Middleware filtering by `MessageEvent`
- - [ ] Refactor all the stupid out
-    > - [ ] Better client state management
  - [ ] Lock down a clean API
- - [ ] Docs
- - [ ] Remove unused `derive`s
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
+    > Many cases should be handled with docs code examples
  - [ ] Async client
+ - [ ] Encode / Decode
+ - [ ] Client ref
  - [ ] REST channel sending
+ - [ ] Remove unused `derive`s
+
+ #### Async
+
+ - [ ] Client
+ - [ ] Channel
+ - [ ] Presence
+
+ #### Examples
+
+ - [ ] Example: Act on system messages && test what happens when we ignore them? Need to handle couldn't subscribe errors.
+
+ #### Middleware
+
+ - [ ] Middleware ordering
+ - [ ] Middleware example (?) try using current API see if middleware needed
+ - [ ] Middleware filtering by `MessageEvent`
 
 # Contributing
 

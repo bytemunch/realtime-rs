@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Enum of presence event types
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PresenceEvent {
@@ -13,9 +14,9 @@ pub enum PresenceEvent {
     Sync,
 }
 
-pub type RawPresenceState = HashMap<String, PresenceMetas>;
+pub type RawPresenceState = HashMap<String, RawPresenceMetas>;
 
-pub type PresenceCallback = Box<dyn FnMut(String, PresenceState, PresenceState)>;
+pub(crate) type PresenceCallback = Box<dyn FnMut(String, PresenceState, PresenceState)>;
 //{
 //  abc123: {1: {foo: bar}, 2: {foo: baz} },
 //  def456: {3: {foo: baz}, 4: {foo: bar} },
@@ -28,12 +29,17 @@ pub type PhxMap = HashMap<String, StateData>;
 
 pub type StateData = HashMap<String, Value>;
 
+/// PresenceState triple nested hashmap.
+///
+/// Layout:
 /// HashMap<id, HashMap<phx_ref, HashMap<key, value>>>
-/// { [id]: { [ref]: { [key]: value } } }
+/// { \[id\]: { \[ref\]: { \[key\]: value } } }
 #[derive(Default, Clone, Debug)]
 pub struct PresenceState(pub PresenceStateInner);
 
 impl PresenceState {
+    /// Returns a once flattened map of presence data:
+    /// HashMap<phx_ref, <key, value>>
     pub fn get_phx_map(&self) -> PhxMap {
         let mut new_map = HashMap::new();
         for (_id, map) in self.0.clone() {
@@ -59,16 +65,18 @@ impl FromIterator<PresenceIteratorItem> for PresenceState {
     }
 }
 
+/// Raw presence meta data
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct PresenceMeta {
+pub struct RawPresenceMeta {
     pub phx_ref: String,
     #[serde(flatten)]
     pub state_data: HashMap<String, Value>,
 }
 
+/// Collection of raw presence metas
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct PresenceMetas {
-    pub metas: Vec<PresenceMeta>,
+pub struct RawPresenceMetas {
+    pub metas: Vec<RawPresenceMeta>,
 }
 
 impl From<RawPresenceState> for PresenceState {
@@ -89,6 +97,7 @@ impl From<RawPresenceState> for PresenceState {
     }
 }
 
+/// Internal, visibility skill issues mean still visible to crate consumer TODO
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RawPresenceDiff {
     joins: RawPresenceState,
@@ -105,40 +114,28 @@ impl From<RawPresenceDiff> for PresenceDiff {
 }
 
 #[derive(Debug, Clone)]
-pub struct PresenceDiff {
+pub(crate) struct PresenceDiff {
     joins: PresenceState,
     leaves: PresenceState,
 }
 
 #[derive(Default)]
-pub struct RealtimePresence {
+pub(crate) struct RealtimePresence {
     pub state: PresenceState,
     callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
 }
 
 impl RealtimePresence {
-    pub fn from_channel_builder(callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>) -> Self {
+    pub(crate) fn from_channel_builder(
+        callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
+    ) -> Self {
         Self {
             state: PresenceState::default(),
             callbacks,
         }
     }
-    pub fn add_callback(
-        &mut self,
-        event: PresenceEvent,
-        callback: Box<dyn FnMut(String, PresenceState, PresenceState)>,
-    ) {
-        if self.callbacks.get(&event).is_none() {
-            self.callbacks.insert(event.clone(), vec![]);
-        }
 
-        self.callbacks
-            .get_mut(&event)
-            .unwrap_or(&mut vec![])
-            .push(callback);
-    }
-
-    pub fn sync(&mut self, new_state: PresenceState) {
+    pub(crate) fn sync(&mut self, new_state: PresenceState) {
         // TODO state? functional? Nah both mixed together. lol and also lmao even
         let joins: PresenceState = new_state
             .0
@@ -194,7 +191,7 @@ impl RealtimePresence {
         }
     }
 
-    pub fn sync_diff(&mut self, diff: PresenceDiff) -> &PresenceState {
+    pub(crate) fn sync_diff(&mut self, diff: PresenceDiff) -> &PresenceState {
         // mutate own state with diff
         // return new state
         // trigger diff callbacks

@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::sync::realtime_presence::{PresenceEvent, RawPresenceDiff, RawPresenceState};
 
+/// Message payload, enum allows each payload type to be contained in
+/// [crate::message::realtime_message::RealtimeMessage] without
+/// needing a seperate struct per message type.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Payload {
@@ -30,14 +33,17 @@ impl Default for Payload {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ReplyPayload {
-    response: Value,
-    status: String,
+    pub response: Value,
+    pub status: String,
 }
 
+/// Data to track with presence
+///
+/// Use [crate::sync::realtime_channel::RealtimeChannel::track()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PresenceTrackPayload {
-    event: PresenceEvent,
-    payload: HashMap<String, Value>,
+    pub event: PresenceEvent, // TODO custom serialize to remove required event here
+    pub payload: HashMap<String, Value>,
 }
 
 impl Default for PresenceTrackPayload {
@@ -58,6 +64,52 @@ impl From<HashMap<String, Value>> for PresenceTrackPayload {
     }
 }
 
+/// Payload for broadcast messages
+/// ```
+/// # use realtime_rs::{
+/// #     message::payload::BroadcastPayload,
+/// #     sync::realtime_client::{NextMessageError, RealtimeClient},
+/// # };
+/// # use std::{collections::HashMap, env};
+/// #
+/// # fn main() -> Result<(), ()> {
+/// #     let url = "http://127.0.0.1:54321".into();
+/// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
+/// #
+/// #     let mut client = RealtimeClient::builder(url, anon_key).build();
+/// #
+/// #     let _ = client.connect();
+/// #
+///       // Create channels
+///       let channel_a = client.channel("topic".into()).build(&mut client);
+///       let channel_b = client.channel("topic".into()).build(&mut client);
+///   
+///       let _ = client.block_until_subscribed(channel_a).unwrap();
+///       let _ = client.block_until_subscribed(channel_b).unwrap();
+///   
+///       // Create message
+///       let mut payload = HashMap::new();
+///       payload.insert("message".into(), "hello, multicast!".into());
+///   
+///       let payload = BroadcastPayload::new("target_event".into(), payload);
+///   
+///       // Send message on both channels
+///       let _ = client
+///           .get_channel_mut(channel_a)
+///           .unwrap()
+///           .broadcast(payload.clone());
+///   
+///       let _ = client
+///           .get_channel_mut(channel_b)
+///           .unwrap()
+///           .broadcast(payload);
+/// #
+/// #     match client.next_message() {
+/// #         Ok(_) => Ok(()),
+/// #         Err(NextMessageError::WouldBlock) => Ok(()),
+/// #         Err(_) => Err(()),
+/// #     }
+/// # }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BroadcastPayload {
     pub event: String,
@@ -65,6 +117,8 @@ pub struct BroadcastPayload {
     #[serde(rename = "type")]
     pub broadcast_type: String, // TODO this is always 'broadcast', impl custom serde ;_;
 }
+
+// TODO impl From<HashMap<String, Value>>
 
 impl BroadcastPayload {
     pub fn new(event: String, payload: HashMap<String, Value>) -> Self {
@@ -86,42 +140,37 @@ impl Default for BroadcastPayload {
     }
 }
 
+/// Payload wrapper for postgres changes
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PostgresChangesPayload {
     pub data: PostgresChangeData,
-    ids: Vec<usize>,
+    pub ids: Vec<usize>,
 }
 
+/// Recieved data regarding a postgres change
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PostgresChangeData {
-    columns: Vec<PostgresColumn>,
-    commit_timestamp: String,
-    errors: Option<String>,
-    old_record: Option<PostgresOldDataRef>,
-    record: Option<HashMap<String, Value>>,
+    pub columns: Vec<PostgresColumn>,
+    pub commit_timestamp: String,
+    pub errors: Option<String>,
+    pub old_record: Option<PostgresOldDataRef>,
+    pub record: Option<HashMap<String, Value>>,
     #[serde(rename = "type")]
     pub change_type: PostgresChangesEvent,
     pub schema: String,
     pub table: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-enum RecordValue {
-    Bool(bool),
-    Number(isize),
-    String(String),
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct PostgresColumn {
-    name: String,
+pub struct PostgresColumn {
+    pub name: String,
     #[serde(rename = "type")]
-    column_type: String,
+    pub column_type: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct PostgresOldDataRef {
-    id: isize,
+pub struct PostgresOldDataRef {
+    pub id: isize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -129,20 +178,23 @@ pub struct AccessTokenPayload {
     pub access_token: String,
 }
 
+/// Subscription result payload
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemPayload {
-    channel: String,
-    extension: String,
-    message: String,
-    status: PayloadStatus,
+    pub channel: String,
+    pub extension: String,
+    pub message: String,
+    pub status: PayloadStatus,
 }
 
+/// Subscription configuration payload wrapper
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinPayload {
     pub config: JoinConfig,
     pub access_token: String,
 }
 
+/// Subscription configuration data
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct JoinConfig {
     pub broadcast: BroadcastConfig,
@@ -150,6 +202,7 @@ pub struct JoinConfig {
     pub postgres_changes: Vec<PostgresChange>,
 }
 
+/// Channel broadcast options
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct BroadcastConfig {
     #[serde(rename = "self")]
@@ -157,6 +210,7 @@ pub struct BroadcastConfig {
     pub ack: bool,
 }
 
+/// Channel presence options
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PresenceConfig {
     pub key: Option<String>,
@@ -186,13 +240,13 @@ pub struct PostgresChange {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinResponsePayload {
-    pub response: JoinResponse,
+    pub response: PostgresChangesList,
     pub status: PayloadStatus,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct JoinResponse {
-    postgres_changes: Vec<PostgresChange>,
+pub struct PostgresChangesList {
+    pub postgres_changes: Vec<PostgresChange>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]

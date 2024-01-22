@@ -1,13 +1,9 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tungstenite::Message;
 
 use crate::message::payload::Payload;
 
-use super::payload::BroadcastPayload;
-
+/// Structure of messages sent to and from the server
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct RealtimeMessage {
     pub event: MessageEvent,
@@ -17,48 +13,14 @@ pub struct RealtimeMessage {
     pub message_ref: Option<String>,
 }
 
-// TODO use derive-builder
 impl RealtimeMessage {
-    pub fn heartbeat() -> RealtimeMessage {
+    pub(crate) fn heartbeat() -> RealtimeMessage {
         RealtimeMessage {
             event: MessageEvent::Heartbeat,
             topic: "phoenix".to_owned(),
             payload: Payload::Empty {},
             message_ref: Some("".to_owned()),
         }
-    }
-
-    pub fn broadcast(event: String, payload: HashMap<String, Value>) -> RealtimeMessage {
-        RealtimeMessage {
-            event: MessageEvent::Broadcast,
-            topic: "".into(),
-            payload: Payload::Broadcast(BroadcastPayload::new(event, payload)),
-            message_ref: None,
-        }
-    }
-
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn event(&mut self, event: MessageEvent) -> &mut Self {
-        self.event = event;
-        self
-    }
-
-    pub fn topic(&mut self, topic: String) -> &mut Self {
-        self.topic = topic;
-        self
-    }
-
-    pub fn payload(&mut self, payload: Payload) -> &mut Self {
-        self.payload = payload;
-        self
-    }
-
-    pub fn message_ref(&mut self, message_ref: Option<String>) -> &mut Self {
-        self.message_ref = message_ref;
-        self
     }
 }
 
@@ -69,6 +31,7 @@ impl From<RealtimeMessage> for Message {
     }
 }
 
+/// Realtime message event list
 #[derive(Serialize, Deserialize, Debug, PartialEq, Default, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageEvent {
