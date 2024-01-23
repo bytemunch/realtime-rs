@@ -151,6 +151,7 @@ pub struct RealtimeClient {
     socket: Option<WebSocket>,
     channels: HashMap<Uuid, RealtimeChannel>,
     messages_this_second: Vec<SystemTime>,
+    next_ref: Uuid,
     // mpsc
     pub(crate) outbound_channel: MessageChannel,
     inbound_channel: MessageChannel,
@@ -165,9 +166,8 @@ pub struct RealtimeClient {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    client_ref: Option<String>,
-    encode: Option<String>, // placeholder
-    decode: Option<String>, // placeholder
+    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
+    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
@@ -271,10 +271,23 @@ impl RealtimeClient {
             None => "ws",
         };
 
+        let mut add_params = String::new();
+        if let Some(params) = &self.params {
+            for (field, value) in params {
+                add_params = format!("{add_params}&{field}={value}");
+            }
+        }
+
+        let mut p_q = uri.path_and_query().unwrap().to_string();
+
+        if !add_params.is_empty() {
+            p_q = format!("{p_q}{add_params}");
+        }
+
         let uri = Uri::builder()
             .scheme(ws_scheme)
             .authority(uri.authority().unwrap().clone())
-            .path_and_query(uri.path_and_query().unwrap().clone())
+            .path_and_query(p_q)
             .build()
             .unwrap();
 
@@ -919,11 +932,15 @@ impl RealtimeClient {
             Ok(raw_message) => match raw_message {
                 Message::Text(string_message) => {
                     // TODO recoverable error
-                    let message: RealtimeMessage =
+                    let mut message: RealtimeMessage =
                         serde_json::from_str(&string_message).expect("Deserialization error: ");
 
                     if DEBUG {
                         println!("[RECV] {:?}", message);
+                    }
+
+                    if let Some(decode) = &self.decode {
+                        message = decode(message);
                     }
 
                     if let Payload::Empty {} = message.payload {
@@ -988,11 +1005,21 @@ impl RealtimeClient {
         let message = self.outbound_channel.0 .1.try_recv();
 
         match message {
-            Ok(message) => {
-                let raw_message = serde_json::to_string(&message);
-                if DEBUG {
-                    println!("[SEND] {:?}", raw_message);
+            Ok(mut message) => {
+                if message.message_ref.is_none() {
+                    message.message_ref = Some(self.next_ref.into());
+                    self.next_ref = Uuid::new_v4();
                 }
+
+                if let Some(encode) = &self.encode {
+                    message = encode(message);
+                }
+
+                if DEBUG {
+                    let raw = serde_json::to_string(&message);
+                    println!("[SEND] {:?}", raw);
+                }
+
                 let _ = socket.send(message.into());
                 self.messages_this_second.push(now);
                 Ok(())
@@ -1053,14 +1080,12 @@ impl Debug for ReconnectFn {
 ///         .build();
 /// #   Ok(())
 /// # }
-#[derive(Debug)]
 pub struct RealtimeClientBuilder {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    client_ref: Option<String>,
-    encode: Option<String>, // placeholder
-    decode: Option<String>, // placeholder
+    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
+    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
@@ -1080,7 +1105,6 @@ impl RealtimeClientBuilder {
             headers,
             params: Default::default(),
             heartbeat_interval: Duration::from_secs(29),
-            client_ref: Default::default(),
             encode: Default::default(),
             decode: Default::default(),
             reconnect_interval: ReconnectFn(Box::new(backoff)),
@@ -1110,7 +1134,7 @@ impl RealtimeClientBuilder {
         self
     }
 
-    /// NOT IMPLEMENTED, placeholder for client params
+    /// Set endpoint URL params
     pub fn params(mut self, params: HashMap<String, String>) -> Self {
         self.params = Some(params);
         self
@@ -1193,13 +1217,22 @@ impl RealtimeClientBuilder {
         self
     }
 
+    pub fn encode(mut self, encode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static) -> Self {
+        self.encode = Some(Box::new(encode));
+        self
+    }
+
+    pub fn decode(mut self, decode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static) -> Self {
+        self.decode = Some(Box::new(decode));
+        self
+    }
+
     /// Consume the [Self] and return a configured [RealtimeClient]
     pub fn build(self) -> RealtimeClient {
         RealtimeClient {
             headers: self.headers,
             params: self.params,
             heartbeat_interval: self.heartbeat_interval,
-            client_ref: self.client_ref,
             encode: self.encode,
             decode: self.decode,
             reconnect_interval: self.reconnect_interval,
@@ -1209,26 +1242,9 @@ impl RealtimeClientBuilder {
             endpoint: self.endpoint,
             access_token: self.access_token,
             max_events_per_second: self.max_events_per_second,
+            next_ref: Uuid::new_v4(),
             ..Default::default()
         }
-    }
-
-    // TODO
-    fn client_ref(mut self, client_ref: String) -> Self {
-        self.client_ref = Some(client_ref);
-        self
-    }
-
-    // TODO
-    fn encode(mut self, encode: String) -> Self {
-        self.encode = Some(encode);
-        self
-    }
-
-    // TODO
-    fn decode(mut self, decode: String) -> Self {
-        self.decode = Some(decode);
-        self
     }
 }
 

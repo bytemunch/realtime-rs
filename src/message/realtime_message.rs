@@ -19,7 +19,7 @@ impl RealtimeMessage {
             event: MessageEvent::Heartbeat,
             topic: "phoenix".to_owned(),
             payload: Payload::Empty {},
-            message_ref: Some("".to_owned()),
+            message_ref: None,
         }
     }
 }

@@ -22,6 +22,8 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [x] TLS websockets
  - [x] Docs
     > - [x] Make `pub(crate)` anything that doesn't need to be user facing
+ - [x] Encode / Decode
+    > Basic user provided function support.
 
 #### Channels
 
@@ -54,8 +56,6 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] Tests
     > Many cases should be handled with docs code examples
  - [ ] Async client
- - [ ] Encode / Decode
- - [ ] Client ref
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
 
