@@ -3,13 +3,12 @@ use uuid::Uuid;
 
 use crate::{
     message::{
-        cdc_message_filter::CdcMessageFilter,
         payload::{
             AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload,
             Payload, PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
             PresenceConfig,
         },
-        realtime_message::{MessageEvent, RealtimeMessage},
+        MessageEvent, PostgresChangeFilter, RealtimeMessage,
     },
     DEBUG,
 };
@@ -22,7 +21,10 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
 
-type CdcCallback = (CdcMessageFilter, Box<dyn FnMut(&PostgresChangesPayload)>);
+type CdcCallback = (
+    PostgresChangeFilter,
+    Box<dyn FnMut(&PostgresChangesPayload)>,
+);
 type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>)>;
 
 /// Channel states
@@ -107,9 +109,11 @@ impl RealtimeChannel {
     /// Track provided state in Realtime Presence
     /// ```
     /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #
     /// #   let mut client = RealtimeClient::builder(url, anon_key)
@@ -120,7 +124,7 @@ impl RealtimeChannel {
     /// #       Err(e) => panic!("Couldn't connect! {:?}", e),
     /// #   };
     /// #
-    /// #   let channel_id = client.channel("topic".into()).build(&mut client);
+    /// #   let channel_id = client.channel("topic").build(&mut client);
     /// #
     /// #   let _ = client.block_until_subscribed(channel_id);
     /// #
@@ -171,17 +175,17 @@ impl RealtimeChannel {
     /// Helper function for sending broadcast messages
     ///```
     /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::{
-    /// #   message::payload::BroadcastPayload,
-    /// #   sync::realtime_client::{NextMessageError, RealtimeClient},
-    /// # };
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
+    /// # use realtime_rs::message::payload::*;  
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #   let mut client = RealtimeClient::builder(url, anon_key).build();
     /// #   let _ = client.connect();
     /// #   let channel = client // TODO broadcast self true
-    /// #       .channel("topic".into())
+    /// #       .channel("topic")
     /// #       .build(&mut client);
     /// #
     /// #  let _ = client.block_until_subscribed(channel).unwrap();
@@ -189,7 +193,7 @@ impl RealtimeChannel {
     ///    let mut payload = HashMap::new();
     ///    payload.insert("message".into(), "hello, broadcast!".into());
     ///
-    ///    let message = BroadcastPayload::new("event".into(), payload);
+    ///    let message = BroadcastPayload::new("event", payload);
     ///
     ///    let _ = client.get_channel_mut(channel).unwrap().broadcast(message);
     /// #
@@ -363,8 +367,8 @@ impl RealtimeChannelBuilder {
     }
 
     /// Set the topic of the channel
-    pub fn topic(mut self, topic: String) -> Self {
-        self.topic = format!("realtime:{}", topic);
+    pub fn topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = format!("realtime:{}", topic.into());
         self
     }
 
@@ -382,32 +386,32 @@ impl RealtimeChannelBuilder {
 
     /// Add a postgres changes callback to this channel
     ///```
-    /// # use realtime_rs::{
-    /// #     message::{cdc_message_filter::CdcMessageFilter, payload::PostgresChangesEvent},
-    /// #     sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
-    /// # };
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::message::payload::*;  
+    /// # use realtime_rs::*;          
     /// # use std::env;
     /// #
     /// # fn main() -> Result<(), ()> {
-    /// #     let url = "http://127.0.0.1:54321".into();
+    /// #     let url = "http://127.0.0.1:54321";
     /// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #     let mut client = RealtimeClient::builder(url, anon_key).build();
     /// #     let _ = client.connect();
     ///
-    ///     let my_cdc_callback = move |msg: &_| {
+    ///     let my_pgc_callback = move |msg: &_| {
     ///         println!("Got message: {:?}", msg);
     ///     };
     ///
     ///     let channel_id = client
-    ///         .channel("topic".into())
-    ///         .on_cdc(
+    ///         .channel("topic")
+    ///         .on_postgres_change(
     ///             PostgresChangesEvent::All,
-    ///             CdcMessageFilter {
+    ///             PostgresChangeFilter {
     ///                 schema: "public".into(),
     ///                 table: Some("todos".into()),
     ///                 ..Default::default()
     ///             },
-    ///             my_cdc_callback,
+    ///             my_pgc_callback,
     ///         )
     ///         .build(&mut client);
     /// #
@@ -424,10 +428,10 @@ impl RealtimeChannelBuilder {
     /// #     }
     /// #     Err(())
     /// # }
-    pub fn on_cdc(
+    pub fn on_postgres_change(
         mut self,
         event: PostgresChangesEvent,
-        filter: CdcMessageFilter,
+        filter: PostgresChangeFilter,
         callback: impl FnMut(&PostgresChangesPayload) + 'static,
     ) -> Self {
         self.postgres_changes.push(PostgresChange {
@@ -451,14 +455,13 @@ impl RealtimeChannelBuilder {
 
     /// Add a presence callback to this channel
     ///```
-    /// # use realtime_rs::sync::{
-    /// #     realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
-    /// #     realtime_presence::PresenceEvent,
-    /// # };
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # use std::env;
     /// #
     /// # fn main() -> Result<(), ()> {
-    /// #     let url = "http://127.0.0.1:54321".into();
+    /// #     let url = "http://127.0.0.1:54321";
     /// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #     let mut client = RealtimeClient::builder(url, anon_key).build();
     /// #     let _ = client.connect();
@@ -503,18 +506,20 @@ impl RealtimeChannelBuilder {
 
     /// Add a broadcast callback to this channel
     /// ```
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # use std::env;
     /// #
     /// # fn main() -> Result<(), ()> {
-    /// #     let url = "http://127.0.0.1:54321".into();
+    /// #     let url = "http://127.0.0.1:54321";
     /// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #     let mut client = RealtimeClient::builder(url, anon_key).build();
     /// #     let _ = client.connect();
     ///
     ///     let channel_id = client
-    ///         .channel("topic".into())
-    ///         .on_broadcast("subtopic".into(), |msg| {
+    ///         .channel("topic")
+    ///         .on_broadcast("subtopic", |msg| {
     ///             println!("recieved broadcast: {:?}", msg);
     ///         })
     ///         .build(&mut client);
@@ -534,9 +539,11 @@ impl RealtimeChannelBuilder {
     /// # }
     pub fn on_broadcast(
         mut self,
-        event: String,
+        event: impl Into<String>,
         callback: impl FnMut(&HashMap<String, Value>) + 'static,
     ) -> Self {
+        let event: String = event.into();
+
         if self.broadcast_callbacks.get_mut(&event).is_none() {
             self.broadcast_callbacks.insert(event.clone(), vec![]);
         }

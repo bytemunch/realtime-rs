@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::sync::realtime_presence::{PresenceEvent, RawPresenceDiff, RawPresenceState};
+use crate::sync::{PresenceEvent, RawPresenceDiff, RawPresenceState};
 
 /// Message payload, enum allows each payload type to be contained in
 /// [crate::message::realtime_message::RealtimeMessage] without
@@ -66,14 +66,14 @@ impl From<HashMap<String, Value>> for PresenceTrackPayload {
 
 /// Payload for broadcast messages
 /// ```
-/// # use realtime_rs::{
-/// #     message::payload::BroadcastPayload,
-/// #     sync::realtime_client::{NextMessageError, RealtimeClient},
-/// # };
+/// # use realtime_rs::message::*;  
+/// # use realtime_rs::sync::*;    
+/// # use realtime_rs::*;          
+/// # use realtime_rs::message::payload::*;  
 /// # use std::{collections::HashMap, env};
 /// #
 /// # fn main() -> Result<(), ()> {
-/// #     let url = "http://127.0.0.1:54321".into();
+/// #     let url = "http://127.0.0.1:54321";
 /// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 /// #
 /// #     let mut client = RealtimeClient::builder(url, anon_key).build();
@@ -81,8 +81,8 @@ impl From<HashMap<String, Value>> for PresenceTrackPayload {
 /// #     let _ = client.connect();
 /// #
 ///       // Create channels
-///       let channel_a = client.channel("topic".into()).build(&mut client);
-///       let channel_b = client.channel("topic".into()).build(&mut client);
+///       let channel_a = client.channel("topic").build(&mut client);
+///       let channel_b = client.channel("topic").build(&mut client);
 ///   
 ///       let _ = client.block_until_subscribed(channel_a).unwrap();
 ///       let _ = client.block_until_subscribed(channel_b).unwrap();
@@ -91,7 +91,7 @@ impl From<HashMap<String, Value>> for PresenceTrackPayload {
 ///       let mut payload = HashMap::new();
 ///       payload.insert("message".into(), "hello, multicast!".into());
 ///   
-///       let payload = BroadcastPayload::new("target_event".into(), payload);
+///       let payload = BroadcastPayload::new("target_event", payload);
 ///   
 ///       // Send message on both channels
 ///       let _ = client
@@ -121,9 +121,9 @@ pub struct BroadcastPayload {
 // TODO impl From<HashMap<String, Value>>
 
 impl BroadcastPayload {
-    pub fn new(event: String, payload: HashMap<String, Value>) -> Self {
+    pub fn new(event: impl Into<String>, payload: HashMap<String, Value>) -> Self {
         BroadcastPayload {
-            event,
+            event: event.into(),
             payload,
             broadcast_type: "broadcast".into(),
         }

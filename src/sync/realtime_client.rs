@@ -26,7 +26,7 @@ use tungstenite::{
 use uuid::Uuid;
 
 use crate::message::payload::Payload;
-use crate::message::realtime_message::RealtimeMessage;
+use crate::message::RealtimeMessage;
 use crate::sync::realtime_channel::{ChannelState, RealtimeChannel};
 use crate::DEBUG;
 
@@ -192,7 +192,10 @@ impl Debug for RealtimeClient {
 
 impl RealtimeClient {
     /// Returns a new [RealtimeClientBuilder] with provided `endpoint` and `access_token`
-    pub fn builder(endpoint: String, access_token: String) -> RealtimeClientBuilder {
+    pub fn builder(
+        endpoint: impl Into<String>,
+        access_token: impl Into<String>,
+    ) -> RealtimeClientBuilder {
         RealtimeClientBuilder::new(endpoint, access_token)
     }
 
@@ -204,11 +207,13 @@ impl RealtimeClient {
     /// Returns a new [RealtimeChannelBuilder] instantiated with the provided `topic`
     /// ```
     /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #   let auth_url = "http://192.168.64.6:9999".into();
+    /// #   let auth_url = "http://192.168.64.6:9999";
     /// #
     /// #   let mut client = RealtimeClient::builder(url, anon_key)
     /// #       .auth_url(auth_url)
@@ -219,14 +224,14 @@ impl RealtimeClient {
     /// #       Err(e) => panic!("Couldn't connect! {:?}", e),
     /// #   };
     /// #
-    ///     let channel_id = client.channel("topic".into()).build(&mut client);
+    ///     let channel_id = client.channel("topic").build(&mut client);
     /// #
     /// #   match client.block_until_subscribed(channel_id) {
     /// #       Ok(uuid) => Ok(()),
     /// #       Err(_channel_state) => Err(())
     /// #   }
     /// # }
-    pub fn channel(&mut self, topic: String) -> RealtimeChannelBuilder {
+    pub fn channel(&mut self, topic: impl Into<String>) -> RealtimeChannelBuilder {
         RealtimeChannelBuilder::new(self).topic(topic)
     }
 
@@ -234,9 +239,11 @@ impl RealtimeClient {
     ///
     /// ```
     /// # use std::env;
-    /// # use realtime_rs::sync::realtime_client::RealtimeClient;
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    ///     let url = "http://127.0.0.1:54321".into();
+    ///     let url = "http://127.0.0.1:54321";
     ///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     ///
     ///     let mut client = RealtimeClient::builder(url, anon_key)
@@ -487,9 +494,11 @@ impl RealtimeClient {
     /// Blocks the current thread until the channel with the provided `channel_id` has subscribed.
     /// ```
     /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #
     /// #   let mut client = RealtimeClient::builder(url, anon_key)
@@ -500,7 +509,7 @@ impl RealtimeClient {
     /// #       Err(e) => panic!("Couldn't connect! {:?}", e),
     /// #   };
     /// #
-    ///     let channel_id = client.channel("topic".into()).build(&mut client);
+    ///     let channel_id = client.channel("topic").build(&mut client);
     ///
     ///     match client.block_until_subscribed(channel_id) {
     ///         Ok(uuid) => Ok(()),
@@ -559,9 +568,11 @@ impl RealtimeClient {
     /// On success returns [Result<(), AuthError]
     /// ```
     /// # use std::env;
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #
     ///     let mut client = RealtimeClient::builder(url, anon_key)
@@ -572,7 +583,7 @@ impl RealtimeClient {
     ///         Err(e) => panic!("Couldn't connect! {:?}", e),
     ///     };
     ///
-    ///     match client.sign_in_with_email_password("test@example.com".into(), "password".into())
+    ///     match client.sign_in_with_email_password("test@example.com", "password")
     ///     {
     ///         Ok(()) => Ok(()),
     ///         Err(_) => Err(())
@@ -580,13 +591,18 @@ impl RealtimeClient {
     /// # }
     pub fn sign_in_with_email_password(
         &mut self,
-        email: String,
-        password: String,
+        email: impl Into<String>,
+        password: impl Into<String>,
     ) -> Result<(), AuthError> {
         let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client. or just like write gotrue-rs already
         let url = self.auth_url.clone().unwrap_or(self.endpoint.clone());
 
         let url = format!("{}/auth/v1", url);
+
+        let email: String = email.into();
+        let password: String = password.into();
+
+        let body = json!({"email": email, "password": password}).to_string();
 
         let res = client
             .post(format!("{}/token?grant_type=password", url))
@@ -596,7 +612,7 @@ impl RealtimeClient {
                 format!("Bearer {}", self.access_token.clone()),
             )
             .header("apikey", self.access_token.clone())
-            .body(json!({"email": email, "password": password}).to_string())
+            .body(body)
             .send();
 
         if let Ok(res) = res {
@@ -608,6 +624,7 @@ impl RealtimeClient {
                     }
                     return Ok(());
                 }
+                // TODO handle different error codes
                 Err(_e) => {
                     return Err(AuthError::BadLogin);
                 }
@@ -651,9 +668,11 @@ impl RealtimeClient {
     ///
     /// ```
     /// # use std::env;
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321".into();
+    /// #   let url = "http://127.0.0.1:54321";
     /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     /// #
     ///     let mut client = RealtimeClient::builder(url, anon_key)
@@ -664,7 +683,7 @@ impl RealtimeClient {
     ///         Err(e) => panic!("Couldn't connect! {:?}", e),
     ///     };
     ///
-    ///     let channel_id = client.channel("topic".into()).build(&mut client);
+    ///     let channel_id = client.channel("topic").build(&mut client);
     ///
     ///     loop {
     ///         if client.get_status() == ConnectionState::Closed {
@@ -1071,9 +1090,11 @@ impl Debug for ReconnectFn {
 /// Builder struct for [RealtimeClient]
 /// ```
 /// # use std::env;
-/// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClientBuilder};
+/// # use realtime_rs::sync::*;
+/// # use realtime_rs::message::*;  
+/// # use realtime_rs::*;          
 /// # fn main() -> Result<(), ()> {
-///     let url = "http://127.0.0.1:54321".into();
+///     let url = "http://127.0.0.1:54321";
 ///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 ///
 ///     let mut client = RealtimeClientBuilder::new(url, anon_key)
@@ -1097,7 +1118,7 @@ pub struct RealtimeClientBuilder {
 
 impl RealtimeClientBuilder {
     /// Creates a new [RealtimeClientBuilder]
-    pub fn new(endpoint: String, access_token: String) -> Self {
+    pub fn new(endpoint: impl Into<String>, access_token: impl Into<String>) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
 
@@ -1111,8 +1132,8 @@ impl RealtimeClientBuilder {
             reconnect_max_attempts: usize::MAX,
             connection_timeout: Duration::from_secs(10),
             auth_url: Default::default(),
-            endpoint,
-            access_token,
+            endpoint: endpoint.into(),
+            access_token: access_token.into(),
             max_events_per_second: 10,
         }
     }
@@ -1157,14 +1178,16 @@ impl RealtimeClientBuilder {
     /// ```
     /// # use std::env;
     /// # use std::time::Duration;
-    /// # use realtime_rs::sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClientBuilder, ReconnectFn};
+    /// # use realtime_rs::sync::*;
+    /// # use realtime_rs::message::*;  
+    /// # use realtime_rs::*;          
     /// # fn main() -> Result<(), ()> {
     ///     fn backoff(attempts: usize) -> Duration {
     ///         let times: Vec<u64> = vec![0, 1, 2, 5, 10];
     ///         Duration::from_secs(times[attempts.min(times.len() - 1)])
     ///     }
     ///
-    ///     let url = "http://127.0.0.1:54321".into();
+    ///     let url = "http://127.0.0.1:54321";
     ///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
     ///
     ///     let mut client = RealtimeClientBuilder::new(url, anon_key)
@@ -1205,8 +1228,8 @@ impl RealtimeClientBuilder {
     /// Set the base URL for the auth server
     /// In live supabase deployments this is the same as the endpoint URL, and defaults as such.
     /// In local deployments this may need to be set manually
-    pub fn auth_url(mut self, auth_url: String) -> Self {
-        self.auth_url = Some(auth_url);
+    pub fn auth_url(mut self, auth_url: impl Into<String>) -> Self {
+        self.auth_url = Some(auth_url.into());
         self
     }
 

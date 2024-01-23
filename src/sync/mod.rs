@@ -1,3 +1,7 @@
-pub mod realtime_channel;
-pub mod realtime_client;
-pub mod realtime_presence;
+mod realtime_channel;
+mod realtime_client;
+mod realtime_presence;
+
+pub use realtime_channel::*;
+pub use realtime_client::*;
+pub use realtime_presence::*;

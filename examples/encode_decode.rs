@@ -2,11 +2,11 @@ use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::payload::{BroadcastConfig, BroadcastPayload, Payload},
-    sync::realtime_client::{NextMessageError, RealtimeClient},
+    sync::{NextMessageError, RealtimeClient},
 };
 
 fn main() {
-    let url = "http://127.0.0.1:54321".into();
+    let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
     fn reverse(s: String) -> String {
@@ -64,14 +64,12 @@ fn main() {
     };
 
     let channel_id = client
-        .channel("reverse_encoder".into())
+        .channel("reverse_encoder")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
             ack: Default::default(),
         })
-        .on_broadcast("test".into(), |b| {
-            println!("[BC RECV] {:?}", b.get("message"))
-        })
+        .on_broadcast("test", |b| println!("[BC RECV] {:?}", b.get("message")))
         .build(&mut client);
 
     let _ = client.block_until_subscribed(channel_id);
@@ -86,7 +84,7 @@ fn main() {
     let _ = client
         .get_channel_mut(channel_id)
         .unwrap()
-        .broadcast(BroadcastPayload::new("test".into(), test_payload));
+        .broadcast(BroadcastPayload::new("test", test_payload));
 
     loop {
         match client.next_message() {

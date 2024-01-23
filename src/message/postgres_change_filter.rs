@@ -7,14 +7,14 @@ use crate::{
 
 /// Incoming message filter for local callbacks
 ///```
-/// # use realtime_rs::{
-/// #     message::{cdc_message_filter::CdcMessageFilter, payload::PostgresChangesEvent},
-/// #     sync::realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
-/// # };
-/// # use std::env;
+/// # use realtime_rs::message::*;  
+/// # use realtime_rs::sync::*;    
+/// # use realtime_rs::*;          
+/// # use realtime_rs::message::payload::*;  
+/// # use std::{collections::HashMap, env};
 /// #
 /// # fn main() -> Result<(), ()> {
-/// #     let url = "http://127.0.0.1:54321".into();
+/// #     let url = "http://127.0.0.1:54321";
 /// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 /// #     let mut client = RealtimeClient::builder(url, anon_key).build();
 /// #     let _ = client.connect();
@@ -23,10 +23,10 @@ use crate::{
 ///     };
 ///
 ///     let channel_id = client
-///         .channel("topic".into())
-///         .on_cdc(
+///         .channel("topic")
+///         .on_postgres_change(
 ///             PostgresChangesEvent::All,
-///             CdcMessageFilter {
+///             PostgresChangeFilter {
 ///                 schema: "public".into(),
 ///                 table: Some("todos".into()),
 ///                 ..Default::default()
@@ -49,13 +49,13 @@ use crate::{
 /// #     Err(())
 /// # }
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct CdcMessageFilter {
+pub struct PostgresChangeFilter {
     pub schema: String,
     pub table: Option<String>,
     pub filter: Option<String>,
 }
 
-impl CdcMessageFilter {
+impl PostgresChangeFilter {
     pub(crate) fn check(&self, message: RealtimeMessage) -> Option<RealtimeMessage> {
         let Payload::PostgresChanges(payload) = &message.payload else {
             if DEBUG {

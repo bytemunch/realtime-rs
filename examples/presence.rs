@@ -1,13 +1,11 @@
 use std::{collections::HashMap, env};
 
 use realtime_rs::sync::{
-    realtime_channel::ChannelState,
-    realtime_client::{ConnectionState, NextMessageError, RealtimeClient},
-    realtime_presence::PresenceEvent,
+    ChannelState, ConnectionState, NextMessageError, PresenceEvent, RealtimeClient,
 };
 
 fn main() {
-    let url = "http://127.0.0.1:54321".into();
+    let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
     let mut client = RealtimeClient::builder(url, anon_key).build();

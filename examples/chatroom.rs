@@ -12,13 +12,13 @@ use std::{
 use realtime_rs::{
     message::payload::{BroadcastConfig, BroadcastPayload},
     sync::{
-        realtime_client::{NextMessageError, RealtimeClient},
-        realtime_presence::PresenceEvent,
+        PresenceEvent, {NextMessageError, RealtimeClient},
     },
-    DEBUG,
 };
 use regex::Regex;
 use serde::Deserialize;
+
+const DEBUG: bool = false;
 
 #[derive(Deserialize)]
 struct ChatMessage {
@@ -26,7 +26,6 @@ struct ChatMessage {
     message: String,
 }
 
-const LOCAL: bool = false;
 // Chatroom using presence and broadcast
 fn main() {
     let mut email = String::new();
@@ -65,22 +64,10 @@ fn main() {
         alias.replace(buf.trim().into());
     }
 
-    let mut url = "http://127.0.0.1:54321".into();
-    let mut anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    let mut auth_url = "http://192.168.64.6:9999".into();
+    let url = "http://127.0.0.1:54321";
+    let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    if !LOCAL {
-        url = format!(
-            "https://{}.supabase.co",
-            env::var("SUPABASE_ID").expect("no supabase id")
-        );
-        anon_key = env::var("ANON_KEY").expect("No anon key!");
-        auth_url = url.clone();
-    }
-
-    let mut client = RealtimeClient::builder(url, anon_key)
-        .auth_url(auth_url)
-        .build();
+    let mut client = RealtimeClient::builder(url, anon_key).build();
 
     println!("Connecting...");
 
@@ -108,12 +95,12 @@ fn main() {
     stdout().flush().unwrap();
 
     let channel_id = client
-        .channel("chatroom".into())
+        .channel("chatroom")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
             ack: false,
         })
-        .on_broadcast("supachat".into(), move |message| {
+        .on_broadcast("supachat", move |message| {
             // TODO impl From<HashMap<String, Value>> for ChatMessage
             let recieved = ChatMessage {
                 message: serde_json::from_value(
@@ -264,7 +251,7 @@ fn main() {
                 payload.insert("message".into(), input.trim().into());
                 payload.insert("author".into(), alias.borrow().trim().into());
 
-                let payload = BroadcastPayload::new("supachat".into(), payload);
+                let payload = BroadcastPayload::new("supachat", payload);
 
                 let _ = client
                     .get_channel_mut(channel_id)

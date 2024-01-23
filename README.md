@@ -55,15 +55,18 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
     > Many cases should be handled with docs code examples
- - [ ] Async client
+ - [ ] Set up CI
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
+    > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
 
  #### Async
 
  - [ ] Client
  - [ ] Channel
  - [ ] Presence
+
+ I've got very limited experience with async rust. Seems tokio is the de-facto standard, but I'm not sure I have a good enough grasp on it to implement effectively, so the first iteration of an async client may be fairly rudimentary.
 
  #### Examples
 
@@ -77,7 +80,11 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 # Contributing
 
-Once I've filled the role that other realtime clients do I'll be open to extra contribution, in the mean time it's all duct tape and brute force so suggestions and PRs, while welcomed, may not be satisfactorily implemented.
+Suggestions and PRs are welcomed!
+
+Feel free to open an issue with any bugs, suggestions or ideas.
+
+To make a PR please clone, branch and then pull request against the repo.
 
 # LICENSE
 
