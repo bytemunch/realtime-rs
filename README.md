@@ -49,6 +49,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ### TODOs
 
+
  - [ ] Async by default, maybe provide sync helper functions
     > The rest of the supabase rs ecosystem is async, so this should be too.
     >> TOKIOOOOOOOOOOOOO
@@ -61,6 +62,13 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
     > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
+
+ #### Broken by Async:
+  - [ ] Autoreconnect
+  - [ ] Block until subscribed
+  - [ ] remove all channels
+  - [ ] Socket R/W
+  - [ ] Disconnect
 
  #### Examples
 

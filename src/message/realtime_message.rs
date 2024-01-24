@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tungstenite::Message;
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::message::payload::Payload;
 

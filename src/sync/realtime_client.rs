@@ -1,35 +1,42 @@
 use std::fmt::{Debug, Display};
-use std::thread::sleep;
 use std::time::SystemTime;
 use std::{
     collections::HashMap,
-    io,
-    net::{TcpStream, ToSocketAddrs},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::Duration,
 };
 
-use native_tls::TlsConnector;
-use tungstenite::{client, Message};
-use tungstenite::{
-    client::{uri_mode, IntoClientRequest},
-    handshake::MidHandshake,
-    http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, Uri},
-    stream::{MaybeTlsStream, Mode, NoDelay},
-    ClientHandshake, Error, HandshakeError, WebSocket as WebSocketWrapper,
-};
+use futures_util::stream::{SplitSink, SplitStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Uri};
+use tokio_tungstenite::tungstenite::{Message, WebSocket};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
 use uuid::Uuid;
 
-use crate::message::payload::Payload;
+use futures_util::{future, pin_mut, StreamExt};
+
 use crate::message::RealtimeMessage;
-use crate::sync::realtime_channel::{ChannelState, RealtimeChannel};
+use crate::sync::realtime_channel::RealtimeChannel;
 use crate::DEBUG;
 
 use super::realtime_channel::RealtimeChannelBuilder;
-
-pub type Response = HttpResponse<Option<Vec<u8>>>;
-pub type WebSocket = WebSocketWrapper<MaybeTlsStream<TcpStream>>;
-
+// Our helper method which will read data from stdin and send it along the
+// sender provided.
+async fn read_stdin(tx: futures_channel::mpsc::UnboundedSender<Message>) {
+    let mut stdin = tokio::io::stdin();
+    loop {
+        let mut buf = vec![0; 1024];
+        let n = match stdin.read(&mut buf).await {
+            Err(_) | Ok(0) => break,
+            Ok(n) => n,
+        };
+        buf.truncate(n);
+        tx.unbounded_send(Message::binary(buf)).unwrap();
+    }
+}
 /// Error type for [RealtimeClient::sign_in_with_email_password()]
 #[derive(PartialEq, Debug)]
 pub enum AuthError {
@@ -133,7 +140,8 @@ enum MonitorSignal {
 pub struct RealtimeClient {
     pub(crate) access_token: String,
     status: ConnectionState,
-    socket: Option<WebSocket>,
+    ws_tx: Option<futures_channel::mpsc::UnboundedSender<Message>>,
+    ws_rx: Option<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
     channels: HashMap<Uuid, RealtimeChannel>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
@@ -163,14 +171,7 @@ pub struct RealtimeClient {
 impl Debug for RealtimeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // TODO this is horrid
-        f.write_fmt(format_args!(
-            "{:?} {:?} {:?} {:?}  {}",
-            self.socket,
-            self.channels,
-            self.inbound_channel.0,
-            self.outbound_channel.0,
-            "TODO middleware debug fmt"
-        ))
+        f.write_fmt(format_args!("todo"))
     }
 }
 
@@ -189,57 +190,16 @@ impl RealtimeClient {
     }
 
     /// Returns a new [RealtimeChannelBuilder] instantiated with the provided `topic`
+    /// TODO CODE
     /// ```
-    /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321";
-    /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #   let auth_url = "http://192.168.64.6:9999";
-    /// #
-    /// #   let mut client = RealtimeClient::builder(url, anon_key)
-    /// #       .auth_url(auth_url)
-    /// #       .build();
-    /// #
-    /// #   match client.connect() {
-    /// #       Ok(_) => {}
-    /// #       Err(e) => panic!("Couldn't connect! {:?}", e),
-    /// #   };
-    /// #
-    ///     let channel_id = client.channel("topic").build(&mut client);
-    /// #
-    /// #   match client.block_until_subscribed(channel_id) {
-    /// #       Ok(uuid) => Ok(()),
-    /// #       Err(_channel_state) => Err(())
-    /// #   }
-    /// # }
     pub fn channel(&mut self, topic: impl Into<String>) -> RealtimeChannelBuilder {
         RealtimeChannelBuilder::new(self).topic(topic)
     }
 
     /// Attempt to create a websocket connection with the server
-    ///
+    /// TODO CODE
     /// ```
-    /// # use std::env;
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    ///     let url = "http://127.0.0.1:54321";
-    ///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    ///
-    ///     let mut client = RealtimeClient::builder(url, anon_key)
-    ///         .build();
-    ///
-    ///     match client.connect() {
-    ///         Ok(_) => {}
-    ///         Err(e) => panic!("Couldn't connect! {:?}", e),
-    ///     };
-    /// #   Ok(())
-    /// # }
-    pub fn connect(&mut self) -> Result<&mut RealtimeClient, ConnectError> {
+    pub async fn connect(&mut self) -> Result<&mut RealtimeClient, ConnectError> {
         let uri: Uri = match format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.access_token
@@ -301,140 +261,36 @@ impl RealtimeClient {
             println!("Connecting... Req: {:?}\n", request);
         }
 
-        let uri = request.uri();
+        let (ws_tx, ws_rx) = futures_channel::mpsc::unbounded();
 
-        let Ok(mode) = uri_mode(uri) else {
-            return Err(ConnectError::BadUri);
+        let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
+        println!("WebSocket handshake has been successfully completed");
+
+        let (write, read) = ws_stream.split();
+
+        let sender = ws_rx.map(Ok).forward(write);
+
+        let reciever = {
+            read.for_each(|message| async {
+                let data = message.unwrap().into_text();
+                println!("GOT {:?}", data);
+                // tokio::io::stdout().write_all(&data).await.unwrap();
+                // TODO see if this closure can be a seperate function on self, then pipe the data
+                // there for sorting into callbacks.
+            })
         };
 
-        let Some(host) = uri.host() else {
-            return Err(ConnectError::BadHost);
-        };
+        let _ = ws_tx.unbounded_send(RealtimeMessage::heartbeat().into());
 
-        let port = uri.port_u16().unwrap_or(match mode {
-            Mode::Plain => 80,
-            Mode::Tls => 443,
-        });
+        pin_mut!(sender, reciever);
 
-        let Ok(mut addrs) = (host, port).to_socket_addrs() else {
-            return Err(ConnectError::BadAddrs);
-        };
+        future::select(sender, reciever).await;
 
-        let mut stream = match TcpStream::connect_timeout(
-            &addrs.next().expect("uhoh no addr"),
-            self.connection_timeout,
-        ) {
-            Ok(stream) => {
-                self.reconnect_attempts = 0;
-                stream
-            }
-            Err(_e) => {
-                if self.reconnect_attempts < self.reconnect_max_attempts {
-                    self.reconnect_attempts += 1;
-                    let backoff = self.reconnect_interval.0.as_ref();
-                    sleep(backoff(self.reconnect_attempts));
-                    return self.connect();
-                }
-                // TODO get reason from stream error
-                return Err(ConnectError::StreamError);
-            }
-        };
-
-        let Ok(()) = NoDelay::set_nodelay(&mut stream, true) else {
-            return Err(ConnectError::NoDelayError);
-        };
-
-        let maybe_tls = match mode {
-            Mode::Tls => {
-                let connector = TlsConnector::new().expect("No TLS tings");
-
-                let connected_stream = connector
-                    .connect(host, stream.try_clone().expect("noclone"))
-                    .unwrap();
-
-                stream
-                    .set_nonblocking(true)
-                    .expect("blocking mode oh nooooo");
-
-                MaybeTlsStream::NativeTls(connected_stream)
-            }
-            Mode::Plain => {
-                stream
-                    .set_nonblocking(true)
-                    .expect("blocking mode oh nooooo");
-
-                MaybeTlsStream::Plain(stream)
-            }
-        };
-
-        let conn: Result<(WebSocket, Response), Error> = match client(request, maybe_tls) {
-            Ok(stream) => {
-                self.reconnect_attempts = 0;
-                Ok(stream)
-            }
-            Err(err) => match err {
-                HandshakeError::Failure(_err) => {
-                    // TODO DRY break reconnect attempts code into own fn
-                    if self.reconnect_attempts < self.reconnect_max_attempts {
-                        self.reconnect_attempts += 1;
-                        let backoff = &self.reconnect_interval.0;
-                        sleep(backoff(self.reconnect_attempts));
-                        return self.connect();
-                    }
-
-                    return Err(ConnectError::HandshakeError);
-                }
-                HandshakeError::Interrupted(mid_hs) => match self.retry_handshake(mid_hs) {
-                    Ok(stream) => Ok(stream),
-                    Err(_err) => {
-                        if self.reconnect_attempts < self.reconnect_max_attempts {
-                            self.reconnect_attempts += 1;
-                            let backoff = &self.reconnect_interval.0;
-                            sleep(backoff(self.reconnect_attempts));
-                            return self.connect();
-                        }
-
-                        // TODO err data
-                        return Err(ConnectError::MaxRetries);
-                    }
-                },
-            },
-        };
-
-        let (socket, res) = conn.expect("Handshake fail");
-
-        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-            return Err(ConnectError::WrongProtocol);
-        }
-
-        self.socket = Some(socket);
+        self.ws_tx = Some(ws_tx);
 
         self.status = ConnectionState::Open;
 
         Ok(self)
-    }
-
-    /// Disconnect the client
-    pub fn disconnect(&mut self) {
-        if self.status == ConnectionState::Closed {
-            return;
-        }
-
-        self.remove_all_channels();
-
-        self.status = ConnectionState::Closed;
-
-        let Some(ref mut socket) = self.socket else {
-            if DEBUG {
-                println!("Already disconnected. {:?}", self.status);
-            }
-            return;
-        };
-
-        let _ = socket.close(None);
-        if DEBUG {
-            println!("Client disconnected. {:?}", self.status);
-        }
     }
 
     /// Queues a [RealtimeMessage] for sending to the server
@@ -461,89 +317,14 @@ impl RealtimeClient {
 
     /// Returns [Some(RealtimeChannel)] if channel was successfully removed, [None] if the channel
     /// was not found.
-    pub fn remove_channel(&mut self, channel_id: Uuid) -> Option<RealtimeChannel> {
+    pub async fn remove_channel(&mut self, channel_id: Uuid) -> Option<RealtimeChannel> {
         if let Some(mut channel) = self.channels.remove(&channel_id) {
             let _ = channel.unsubscribe();
-
-            if self.channels.is_empty() {
-                self.disconnect();
-            }
 
             return Some(channel);
         }
 
         None
-    }
-
-    /// Blocks the current thread until the channel with the provided `channel_id` has subscribed.
-    /// ```
-    /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321";
-    /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #
-    /// #   let mut client = RealtimeClient::builder(url, anon_key)
-    /// #       .build();
-    /// #
-    /// #   match client.connect() {
-    /// #       Ok(_) => {}
-    /// #       Err(e) => panic!("Couldn't connect! {:?}", e),
-    /// #   };
-    /// #
-    ///     let channel_id = client.channel("topic").build(&mut client);
-    ///
-    ///     match client.block_until_subscribed(channel_id) {
-    ///         Ok(uuid) => Ok(()),
-    ///         Err(channel_state) => Err(())
-    ///     }
-    /// # }
-    pub fn block_until_subscribed(&mut self, channel_id: Uuid) -> Result<Uuid, ChannelState> {
-        // TODO ergonomically this would fit better as a function on RealtimeChannel but borrow
-        // checker
-
-        let channel = self.channels.get_mut(&channel_id);
-
-        let channel = channel.unwrap();
-
-        if channel.status == ChannelState::Joined {
-            return Ok(channel.id);
-        }
-
-        if channel.status != ChannelState::Joining {
-            self.channels.get_mut(&channel_id).unwrap().subscribe();
-        }
-
-        loop {
-            match self.next_message() {
-                Ok(channel_ids) => {
-                    if DEBUG {
-                        println!(
-                            "[Blocking Subscribe] Message forwarded to {:?}",
-                            channel_ids
-                        )
-                    }
-                }
-                Err(NextMessageError::WouldBlock) => {}
-                Err(_e) => {
-                    //println!("NextMessageError: {:?}", e)
-                }
-            }
-
-            let channel = self.channels.get_mut(&channel_id).unwrap();
-
-            match channel.status {
-                ChannelState::Joined => {
-                    break;
-                }
-                ChannelState::Closed => return Err(ChannelState::Closed),
-                _ => {}
-            }
-        }
-
-        Ok(channel_id)
     }
 
     /// Use provided JWT to authorize future requests from this client and all channels
@@ -620,7 +401,7 @@ impl RealtimeClient {
     ///     println!("Client closed.");
     /// #   return Err(());
     /// # }
-    pub fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
+    pub async fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         match self.status {
             ConnectionState::Closed => {
                 return Err(NextMessageError::ClientClosed);
@@ -637,13 +418,9 @@ impl RealtimeClient {
             ConnectionState::Open => {}
         }
 
-        match self.run_monitor() {
+        match self.run_monitor().await {
             Ok(_) => {}
             Err(MonitorError::WouldBlock) => {}
-            Err(MonitorError::MaxReconnects) => {
-                self.disconnect();
-                return Err(NextMessageError::MonitorError(MonitorError::MaxReconnects));
-            }
             Err(e) => {
                 return Err(NextMessageError::MonitorError(e));
             }
@@ -654,23 +431,6 @@ impl RealtimeClient {
         for channel in self.channels.values_mut() {
             let _ = channel.drain_queue();
             // all errors here are wouldblock, i think
-        }
-
-        match self.write_socket() {
-            Ok(()) => {}
-            Err(SocketError::WouldBlock) => {}
-            Err(e) => {
-                self.reconnect();
-                return Err(NextMessageError::SocketError(e));
-            }
-        }
-
-        match self.read_socket() {
-            Ok(()) => {}
-            Err(e) => {
-                self.reconnect();
-                return Err(NextMessageError::SocketError(e));
-            }
         }
 
         match self.inbound_channel.0 .1.try_recv() {
@@ -713,83 +473,7 @@ impl RealtimeClient {
         message
     }
 
-    fn remove_all_channels(&mut self) {
-        if self.status == ConnectionState::Closing || self.status == ConnectionState::Closed {
-            return;
-        }
-
-        self.status = ConnectionState::Closing;
-
-        // wait until inbound_rx is drained
-        loop {
-            let recv = self.next_message();
-
-            if Err(NextMessageError::WouldBlock) == recv {
-                break;
-            }
-        }
-
-        loop {
-            let _ = self.next_message();
-
-            let mut all_channels_closed = true;
-
-            for channel in self.channels.values_mut() {
-                let channel_state = channel.unsubscribe();
-
-                match channel_state {
-                    Ok(state) => {
-                        if state != ChannelState::Closed {
-                            all_channels_closed = false;
-                        }
-                    }
-                    Err(e) => {
-                        // TODO error handling
-                        if DEBUG {
-                            println!("Unsubscribe error: {:?}", e);
-                        }
-                    }
-                }
-            }
-
-            if all_channels_closed {
-                if DEBUG {
-                    println!("All channels closed!");
-                }
-                break;
-            }
-        }
-
-        self.channels.clear();
-    }
-
-    fn retry_handshake(
-        &mut self,
-        mid_hs: MidHandshake<ClientHandshake<MaybeTlsStream<TcpStream>>>,
-    ) -> Result<(WebSocket, Response), SocketError> {
-        match mid_hs.handshake() {
-            Ok(stream) => Ok(stream),
-            Err(e) => match e {
-                HandshakeError::Interrupted(mid_hs) => {
-                    // TODO sleeping main thread bad
-                    if self.reconnect_attempts < self.reconnect_max_attempts {
-                        self.reconnect_attempts += 1;
-                        let backoff = &self.reconnect_interval.0;
-                        sleep(backoff(self.reconnect_attempts));
-                        return self.retry_handshake(mid_hs);
-                    }
-
-                    Err(SocketError::TooManyRetries)
-                }
-                HandshakeError::Failure(_err) => {
-                    // TODO pass error data
-                    Err(SocketError::HandshakeError)
-                }
-            },
-        }
-    }
-
-    fn run_monitor(&mut self) -> Result<(), MonitorError> {
+    async fn run_monitor(&mut self) -> Result<(), MonitorError> {
         if self.reconnect_now.is_none() {
             self.reconnect_now = Some(SystemTime::now());
 
@@ -814,7 +498,7 @@ impl RealtimeClient {
                     self.reconnect_attempts += 1;
                     self.reconnect_now.take();
 
-                    match self.connect() {
+                    match self.connect().await {
                         Ok(_) => {
                             for channel in self.channels.values_mut() {
                                 channel.subscribe();
@@ -849,126 +533,6 @@ impl RealtimeClient {
         self.heartbeat_now.take();
 
         let _ = self.send(RealtimeMessage::heartbeat());
-    }
-
-    fn read_socket(&mut self) -> Result<(), SocketError> {
-        let Some(ref mut socket) = self.socket else {
-            return Err(SocketError::NoSocket);
-        };
-
-        if !socket.can_read() {
-            return Err(SocketError::NoRead);
-        }
-
-        match socket.read() {
-            Ok(raw_message) => match raw_message {
-                Message::Text(string_message) => {
-                    // TODO recoverable error
-                    let mut message: RealtimeMessage =
-                        serde_json::from_str(&string_message).expect("Deserialization error: ");
-
-                    if DEBUG {
-                        println!("[RECV] {:?}", message);
-                    }
-
-                    if let Some(decode) = &self.decode {
-                        message = decode(message);
-                    }
-
-                    if let Payload::Empty {} = message.payload {
-                        if DEBUG {
-                            println!("Possibly malformed payload: {:?}", string_message)
-                        }
-                    }
-
-                    let _ = self.inbound_channel.0 .0.send(message);
-                    Ok(())
-                }
-                Message::Close(_close_message) => {
-                    self.disconnect();
-                    Err(SocketError::Disconnected)
-                }
-                _ => {
-                    // do nothing on ping, pong, binary messages
-                    Err(SocketError::WouldBlock)
-                }
-            },
-            Err(Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
-                // do nothing here :)
-                Ok(())
-            }
-            Err(err) => {
-                if DEBUG {
-                    println!("Socket read error: {:?}", err);
-                }
-                self.status = ConnectionState::Reconnect;
-                let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
-                Err(SocketError::WouldBlock)
-            }
-        }
-    }
-
-    fn write_socket(&mut self) -> Result<(), SocketError> {
-        let Some(ref mut socket) = self.socket else {
-            return Err(SocketError::NoSocket);
-        };
-
-        if !socket.can_write() {
-            return Err(SocketError::NoWrite);
-        }
-
-        // Throttling
-        let now = SystemTime::now();
-
-        self.messages_this_second = self
-            .messages_this_second
-            .clone() // TODO do i need this clone? can i mutate in-place?
-            .into_iter()
-            .filter(|st| now.duration_since(*st).unwrap_or_default() < Duration::from_secs(1))
-            .collect();
-
-        if self.messages_this_second.len() >= self.max_events_per_second {
-            return Err(SocketError::WouldBlock);
-        }
-
-        // Send to server
-        // TODO should drain outbound_channel
-        // TODO drain should respect throttling
-        let message = self.outbound_channel.0 .1.try_recv();
-
-        match message {
-            Ok(mut message) => {
-                if message.message_ref.is_none() {
-                    message.message_ref = Some(self.next_ref.into());
-                    self.next_ref = Uuid::new_v4();
-                }
-
-                if let Some(encode) = &self.encode {
-                    message = encode(message);
-                }
-
-                if DEBUG {
-                    let raw = serde_json::to_string(&message);
-                    println!("[SEND] {:?}", raw);
-                }
-
-                let _ = socket.send(message.into());
-                self.messages_this_second.push(now);
-                Ok(())
-            }
-            Err(TryRecvError::Empty) => {
-                // do nothing
-                Ok(())
-            }
-            Err(e) => {
-                if DEBUG {
-                    println!("outbound error: {:?}", e);
-                }
-                self.status = ConnectionState::Reconnect;
-                let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
-                Err(SocketError::WouldBlock)
-            }
-        }
     }
 
     fn reconnect(&mut self) {
