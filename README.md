@@ -28,12 +28,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 #### Channels
 
  - [x] Broadcast
-   > Very basic implementation, so far untested across different devices
  - [x] Gracefully disconnecting Channels
    > more work and testing needed here
  - [x] Channel states
  - [x] Client `set_auth` + cascade through channels
-   > Untested cos no GoTrue, or supabase Auth, or whatever it's calling itself nowadays. May look into remedying this lack of auth once realtime is done
  - [x] Presence
  - [x] Blocking `.subscribe()`
    > currently implemented on the client due to my skill issues with the borrow checker. plan to move it to channel once im good at coding
@@ -51,6 +49,10 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
 
 ### TODOs
 
+ - [ ] Async by default, maybe provide sync helper functions
+    > The rest of the supabase rs ecosystem is async, so this should be too.
+    >> TOKIOOOOOOOOOOOOO
+
  - [ ] Lock down a clean API
  - [ ] Anything else I can find to do before writing tests
  - [ ] Tests
@@ -59,14 +61,6 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
     > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
-
- #### Async
-
- - [ ] Client
- - [ ] Channel
- - [ ] Presence
-
- I've got very limited experience with async rust. Seems tokio is the de-facto standard, but I'm not sure I have a good enough grasp on it to implement effectively, so the first iteration of an async client may be fairly rudimentary.
 
  #### Examples
 

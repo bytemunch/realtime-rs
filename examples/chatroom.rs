@@ -10,10 +10,11 @@ use std::{
 };
 
 use realtime_rs::{
-    message::payload::{BroadcastConfig, BroadcastPayload},
-    sync::{
-        PresenceEvent, {NextMessageError, RealtimeClient},
+    message::{
+        payload::{BroadcastConfig, BroadcastPayload},
+        presence::PresenceEvent,
     },
+    sync::{NextMessageError, RealtimeClient},
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -27,7 +28,8 @@ struct ChatMessage {
 }
 
 // Chatroom using presence and broadcast
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut email = String::new();
     let mut password = String::new();
     let alias = Rc::new(RefCell::new(String::new()));
@@ -67,6 +69,7 @@ fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
+    let mut gotrue = go_true::Client::new("http://192.168.64.7:9999".to_string());
     let mut client = RealtimeClient::builder(url, anon_key).build();
 
     println!("Connecting...");
@@ -79,8 +82,13 @@ fn main() {
     println!("Logging in...");
 
     if !email.is_empty() && !password.is_empty() {
-        match client.sign_in_with_email_password(email, password) {
-            Ok(()) => {}
+        match gotrue
+            .sign_in(go_true::EmailOrPhone::Email(email), &password)
+            .await
+        {
+            Ok(session) => {
+                client.set_auth(session.access_token);
+            }
             Err(e) => return println!("Login error: {:?}", e),
         }
     }

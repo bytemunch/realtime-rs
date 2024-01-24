@@ -8,11 +8,8 @@ use realtime_rs::{
 fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    let auth_url = "http://192.168.64.7:9999";
 
-    let mut client = RealtimeClient::builder(url, anon_key)
-        .auth_url(auth_url)
-        .build();
+    let mut client = RealtimeClient::builder(url, anon_key).build();
 
     let _ = client.connect();
 

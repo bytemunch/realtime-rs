@@ -9,9 +9,12 @@ license = "MIT OR Apache-2.0"
 futures-util = "0.3.30"
 native-tls = "0.2.11"
 regex = "1.10.3"
-reqwest = { version = "0.11.23", features = ["blocking", "json"] }
 serde = { version = "1.0.193", features = ["serde_derive"] }
 serde_json = "1.0.108"
+tokio = { version = "1.35.1", features = ["rt", "macros"] }
 tungstenite = { version = "0.21.0", features = ["native-tls"] }
 url = "2.5.0"
 uuid = { version = "1.6.1", features = ["fast-rng", "v4"] }
+
+[dev-dependencies]
+go_true = {version = "0.1.1"}

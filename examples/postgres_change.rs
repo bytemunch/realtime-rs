@@ -5,23 +5,33 @@ use realtime_rs::{
     sync::{ConnectionState, NextMessageError, RealtimeClient},
 };
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
     let event_counter = Rc::new(RefCell::new(0));
 
-    let mut client = RealtimeClient::builder(url, anon_key).build();
+    let mut gotrue = go_true::Client::new("http://192.168.64.7:9999".to_string());
+
+    let Ok(session) = gotrue
+        .sign_in(
+            go_true::EmailOrPhone::Email("test@example.com".into()),
+            &String::from("password"),
+        )
+        .await
+    else {
+        return println!("Login error");
+    };
+
+    let mut client = RealtimeClient::builder(url, anon_key)
+        .access_token(session.access_token)
+        .build();
 
     match client.connect() {
         Ok(_) => {}
         Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
     };
-
-    match client.sign_in_with_email_password("test@example.com", "password") {
-        Ok(()) => {}
-        Err(e) => println!("Signin failed: {:?}", e),
-    }
 
     let rc = Rc::clone(&event_counter);
 

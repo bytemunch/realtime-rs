@@ -1,7 +1,8 @@
 use std::{collections::HashMap, env};
 
-use realtime_rs::sync::{
-    ChannelState, ConnectionState, NextMessageError, PresenceEvent, RealtimeClient,
+use realtime_rs::{
+    message::presence::PresenceEvent,
+    sync::{ChannelState, ConnectionState, NextMessageError, RealtimeClient},
 };
 
 fn main() {

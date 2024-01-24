@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fmt::{Debug, Display};
 use std::thread::sleep;
 use std::time::SystemTime;
@@ -12,9 +10,6 @@ use std::{
 };
 
 use native_tls::TlsConnector;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::Deserialize;
-use serde_json::{json, Value};
 use tungstenite::{client, Message};
 use tungstenite::{
     client::{uri_mode, IntoClientRequest},
@@ -133,16 +128,6 @@ enum MonitorSignal {
     Reconnect,
 }
 
-#[derive(Deserialize)]
-struct AuthResponse {
-    access_token: String,
-    token_type: String,
-    expires_in: usize,
-    expires_at: usize,
-    refresh_token: String,
-    user: HashMap<String, Value>,
-}
-
 /// Synchronous websocket client that interfaces with Supabase Realtime
 #[derive(Default)]
 pub struct RealtimeClient {
@@ -171,7 +156,6 @@ pub struct RealtimeClient {
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
-    auth_url: Option<String>,
     endpoint: String,
     max_events_per_second: usize,
 }
@@ -266,7 +250,6 @@ impl RealtimeClient {
             Err(_e) => return Err(ConnectError::BadUri),
         };
 
-        // TODO REFAC tidy
         let ws_scheme = match uri.scheme_str() {
             Some(scheme) => {
                 if scheme == "http" {
@@ -275,7 +258,7 @@ impl RealtimeClient {
                     "wss"
                 }
             }
-            None => "ws",
+            None => "wss",
         };
 
         let mut add_params = String::new();
@@ -309,9 +292,10 @@ impl RealtimeClient {
             .expect("malformed access token?");
         headers.insert("Authorization", auth);
 
-        // unwrap: shouldn't fail
         let xci: HeaderValue = "realtime-rs/0.1.0".to_string().parse().unwrap();
         headers.insert("X-Client-Info", xci);
+
+        headers.extend(self.headers.clone());
 
         if DEBUG {
             println!("Connecting... Req: {:?}\n", request);
@@ -560,77 +544,6 @@ impl RealtimeClient {
         }
 
         Ok(channel_id)
-    }
-
-    // TODO static version of this that just returns the JWT, so client can be signed in from init
-    /// Sets this client's access token to the response of a signin request.
-    /// Stopgap solution while there is no `gotrue-rs` crate (:
-    /// On success returns [Result<(), AuthError]
-    /// ```
-    /// # use std::env;
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321";
-    /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #
-    ///     let mut client = RealtimeClient::builder(url, anon_key)
-    ///         .build();
-    ///
-    ///     match client.connect() {
-    ///         Ok(_) => {}
-    ///         Err(e) => panic!("Couldn't connect! {:?}", e),
-    ///     };
-    ///
-    ///     match client.sign_in_with_email_password("test@example.com", "password")
-    ///     {
-    ///         Ok(()) => Ok(()),
-    ///         Err(_) => Err(())
-    ///     }
-    /// # }
-    pub fn sign_in_with_email_password(
-        &mut self,
-        email: impl Into<String>,
-        password: impl Into<String>,
-    ) -> Result<(), AuthError> {
-        let client = reqwest::blocking::Client::new(); //TODO one reqwest client per realtime client. or just like write gotrue-rs already
-        let url = self.auth_url.clone().unwrap_or(self.endpoint.clone());
-
-        let url = format!("{}/auth/v1", url);
-
-        let email: String = email.into();
-        let password: String = password.into();
-
-        let body = json!({"email": email, "password": password}).to_string();
-
-        let res = client
-            .post(format!("{}/token?grant_type=password", url))
-            .header(CONTENT_TYPE, "application/json")
-            .header(
-                AUTHORIZATION,
-                format!("Bearer {}", self.access_token.clone()),
-            )
-            .header("apikey", self.access_token.clone())
-            .body(body)
-            .send();
-
-        if let Ok(res) = res {
-            match res.json::<AuthResponse>() {
-                Ok(res) => {
-                    self.set_auth(res.access_token);
-                    if DEBUG {
-                        println!("Login success");
-                    }
-                    return Ok(());
-                }
-                // TODO handle different error codes
-                Err(_e) => {
-                    return Err(AuthError::BadLogin);
-                }
-            }
-        }
-        Err(AuthError::MalformedData)
     }
 
     /// Use provided JWT to authorize future requests from this client and all channels
@@ -1118,7 +1031,7 @@ pub struct RealtimeClientBuilder {
 
 impl RealtimeClientBuilder {
     /// Creates a new [RealtimeClientBuilder]
-    pub fn new(endpoint: impl Into<String>, access_token: impl Into<String>) -> Self {
+    pub fn new(endpoint: impl Into<String>, anon_key: impl Into<String>) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
 
@@ -1133,9 +1046,15 @@ impl RealtimeClientBuilder {
             connection_timeout: Duration::from_secs(10),
             auth_url: Default::default(),
             endpoint: endpoint.into(),
-            access_token: access_token.into(),
+            access_token: anon_key.into(),
             max_events_per_second: 10,
         }
+    }
+
+    pub fn access_token(mut self, access_token: impl Into<String>) -> Self {
+        self.access_token = access_token.into();
+
+        self
     }
 
     /// Sets the client headers. Headers always contain "X-Client-Info: realtime-rs/{version}".
@@ -1261,7 +1180,6 @@ impl RealtimeClientBuilder {
             reconnect_interval: self.reconnect_interval,
             reconnect_max_attempts: self.reconnect_max_attempts,
             connection_timeout: self.connection_timeout,
-            auth_url: self.auth_url,
             endpoint: self.endpoint,
             access_token: self.access_token,
             max_events_per_second: self.max_events_per_second,

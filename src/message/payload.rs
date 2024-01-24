@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::sync::{PresenceEvent, RawPresenceDiff, RawPresenceState};
+use super::presence::{PresenceEvent, RawPresenceDiff, RawPresenceState};
 
 /// Message payload, enum allows each payload type to be contained in
 /// [crate::message::realtime_message::RealtimeMessage] without

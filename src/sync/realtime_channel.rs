@@ -8,15 +8,13 @@ use crate::{
             Payload, PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
             PresenceConfig,
         },
+        presence::{PresenceCallback, PresenceEvent, PresenceState},
         MessageEvent, PostgresChangeFilter, RealtimeMessage,
     },
     DEBUG,
 };
 
-use crate::sync::{
-    realtime_client::RealtimeClient,
-    realtime_presence::{PresenceCallback, PresenceEvent, PresenceState, RealtimePresence},
-};
+use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc::{self, SendError};
