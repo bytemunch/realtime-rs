@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::{
     collections::HashMap,
@@ -6,13 +7,12 @@ use std::{
     time::Duration,
 };
 
-use futures_util::stream::{SplitSink, SplitStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Uri};
-use tokio_tungstenite::tungstenite::{Message, WebSocket};
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
 
 use uuid::Uuid;
 
@@ -141,8 +141,9 @@ pub struct RealtimeClient {
     pub(crate) access_token: String,
     status: ConnectionState,
     ws_tx: Option<futures_channel::mpsc::UnboundedSender<Message>>,
-    ws_rx: Option<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+    ws_rx: Option<futures_channel::mpsc::UnboundedReceiver<Message>>,
     channels: HashMap<Uuid, RealtimeChannel>,
+    channel_tx_list: Arc<Mutex<Vec<(String, futures_channel::mpsc::UnboundedSender<Message>)>>>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
     // mpsc
@@ -261,41 +262,69 @@ impl RealtimeClient {
             println!("Connecting... Req: {:?}\n", request);
         }
 
-        let (ws_tx, ws_rx) = futures_channel::mpsc::unbounded();
+        let (ws_tx_tx, ws_tx_rx) = futures_channel::mpsc::unbounded();
+        let (ws_rx_tx, ws_rx_rx) = futures_channel::mpsc::unbounded();
 
         let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
         println!("WebSocket handshake has been successfully completed");
 
-        let (write, read) = ws_stream.split();
+        let (write, mut read) = ws_stream.split();
 
-        let sender = ws_rx.map(Ok).forward(write);
+        let _send_thread = tokio::spawn(async move {
+            let sender = ws_tx_rx.map(Ok).forward(write);
+            pin_mut!(sender);
+            let _ = sender.await;
+        });
 
-        let reciever = {
-            read.for_each(|message| async {
-                let data = message.unwrap().into_text();
-                println!("GOT {:?}", data);
-                // tokio::io::stdout().write_all(&data).await.unwrap();
-                // TODO see if this closure can be a seperate function on self, then pipe the data
-                // there for sorting into callbacks.
-            })
-        };
+        let channel_list = self.channel_tx_list.clone();
 
-        let _ = ws_tx.unbounded_send(RealtimeMessage::heartbeat().into());
+        let _recieve_thread = tokio::spawn(async move {
+            while let Some(msg) = read.next().await {
+                if let Ok(msg) = msg {
+                    let list = channel_list.lock().await;
 
-        pin_mut!(sender, reciever);
+                    let list: &Vec<(String, futures_channel::mpsc::UnboundedSender<Message>)> =
+                        list.as_ref();
 
-        future::select(sender, reciever).await;
+                    // ITS ALIIIIIIVE
+                    for (topic, tx) in list {
+                        println!("{}, {:?}", topic, tx);
+                    }
 
-        self.ws_tx = Some(ws_tx);
+                    let _ = ws_rx_tx.unbounded_send(msg);
+
+                    // Send msg to each channel's tx
+                    //
+                    // arc mutex list of (channel filter bits, channel tx)
+                }
+            }
+        });
 
         self.status = ConnectionState::Open;
+
+        self.ws_tx = Some(ws_tx_tx);
+        self.ws_rx = Some(ws_rx_rx);
+
+        let _ = self
+            .ws_tx
+            .as_mut()
+            .unwrap()
+            .unbounded_send(RealtimeMessage::heartbeat().into());
 
         Ok(self)
     }
 
-    /// Queues a [RealtimeMessage] for sending to the server
-    pub fn send(&mut self, msg: RealtimeMessage) -> Result<(), mpsc::SendError<RealtimeMessage>> {
-        self.outbound_channel.0 .0.send(msg)
+    pub async fn handle_incoming(&mut self) {
+        while let Some(msg) = self.ws_rx.as_mut().unwrap().next().await {
+            println!("Got it! {:?}", msg);
+        }
+    }
+
+    pub fn send(
+        &mut self,
+        msg: RealtimeMessage,
+    ) -> Result<(), futures_channel::mpsc::TrySendError<Message>> {
+        self.ws_tx.as_mut().unwrap().unbounded_send(msg.into())
     }
 
     /// Returns an optional mutable reference to the [RealtimeChannel] with the provided [Uuid].
@@ -357,50 +386,8 @@ impl RealtimeClient {
     }
 
     /// The main step function for driving the [RealtimeClient]
-    ///
-    /// Designed to be used in a WouldBlock-aware loop
-    ///
+    /// TODO code
     /// ```
-    /// # use std::env;
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321";
-    /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #
-    ///     let mut client = RealtimeClient::builder(url, anon_key)
-    ///         .build();
-    ///
-    ///     match client.connect() {
-    ///         Ok(_) => {}
-    ///         Err(e) => panic!("Couldn't connect! {:?}", e),
-    ///     };
-    ///
-    ///     let channel_id = client.channel("topic").build(&mut client);
-    ///
-    ///     loop {
-    ///         if client.get_status() == ConnectionState::Closed {
-    ///             break;
-    ///         }
-    ///
-    ///         match client.next_message() {
-    ///             Ok(channel_ids) => {
-    ///                 println!("Message forwarded to {:?}", channel_ids);
-    /// #               return Ok(());
-    ///             }
-    ///             Err(NextMessageError::WouldBlock) => {
-    /// #               return Ok(());
-    ///             }
-    ///             Err(e) => {
-    ///                 panic!("NextMessageError: {:?}", e);
-    ///             }
-    ///         }
-    ///     }
-    ///
-    ///     println!("Client closed.");
-    /// #   return Err(());
-    /// # }
     pub async fn next_message(&mut self) -> Result<Vec<Uuid>, NextMessageError> {
         match self.status {
             ConnectionState::Closed => {
@@ -428,11 +415,6 @@ impl RealtimeClient {
 
         self.run_heartbeat();
 
-        for channel in self.channels.values_mut() {
-            let _ = channel.drain_queue();
-            // all errors here are wouldblock, i think
-        }
-
         match self.inbound_channel.0 .1.try_recv() {
             Ok(mut message) => {
                 let mut ids = vec![];
@@ -456,14 +438,25 @@ impl RealtimeClient {
         }
     }
 
-    pub(crate) fn add_channel(&mut self, channel: RealtimeChannel) -> Uuid {
+    pub(crate) async fn add_channel(&mut self, channel: RealtimeChannel) -> Uuid {
         let id = channel.id;
+
+        let list = self.channel_tx_list.clone();
+
+        let mut list = list.lock().await;
+
+        let list: &mut Vec<(String, futures_channel::mpsc::UnboundedSender<Message>)> =
+            list.as_mut();
+
+        list.push((channel.topic.clone(), channel.channel_tx.clone()));
+
         self.channels.insert(channel.id, channel);
+
         id
     }
 
-    pub(crate) fn get_channel_tx(&self) -> Sender<RealtimeMessage> {
-        self.outbound_channel.0 .0.clone()
+    pub(crate) fn get_channel_tx(&self) -> futures_channel::mpsc::UnboundedSender<Message> {
+        self.ws_tx.clone().unwrap()
     }
 
     fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {

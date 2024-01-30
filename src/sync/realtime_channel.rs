@@ -1,4 +1,6 @@
+use futures_channel::mpsc::TrySendError;
 use serde_json::Value;
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::{
@@ -17,7 +19,6 @@ use crate::{
 use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::mpsc::{self, SendError};
 
 type CdcCallback = (
     PostgresChangeFilter,
@@ -38,7 +39,7 @@ pub enum ChannelState {
 /// Error for channel send failures
 #[derive(Debug)]
 pub enum ChannelSendError {
-    SendError(SendError<RealtimeMessage>),
+    SendError(TrySendError<Message>),
     ChannelError(ChannelState),
 }
 
@@ -49,10 +50,11 @@ pub struct RealtimeChannel {
     pub(crate) id: Uuid,
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
     broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
-    tx: mpsc::Sender<RealtimeMessage>,
+    client_tx: futures_channel::mpsc::UnboundedSender<Message>,
+    pub(crate) channel_tx: futures_channel::mpsc::UnboundedSender<Message>,
+    channel_rx: futures_channel::mpsc::UnboundedReceiver<Message>,
     join_payload: JoinPayload,
     presence: RealtimePresence,
-    message_queue: Vec<RealtimeMessage>,
 }
 
 // TODO channel options with broadcast + presence settings
@@ -75,7 +77,7 @@ impl RealtimeChannel {
 
         self.status = ChannelState::Joining;
 
-        let _ = self.tx.send(join_message);
+        let _ = self.client_tx.unbounded_send(join_message.into());
     }
 
     /// Leave the channel
@@ -162,12 +164,11 @@ impl RealtimeChannel {
         if self.status == ChannelState::Leaving {
             return Err(ChannelSendError::ChannelError(self.status));
         }
-        // queue message
-        // TODO use mpsc channel as queue, drain only when realtime channel ready?
-        // prevents need for mut access when sending
-        self.message_queue.push(message);
 
-        self.drain_queue()
+        match self.client_tx.unbounded_send(message.into()) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(ChannelSendError::SendError(e)),
+        }
     }
 
     /// Helper function for sending broadcast messages
@@ -231,20 +232,6 @@ impl RealtimeChannel {
         };
 
         self.send(access_token_message)
-    }
-
-    pub(crate) fn drain_queue(&mut self) -> Result<(), ChannelSendError> {
-        if self.status != ChannelState::Joined && self.status != ChannelState::Joining {
-            return Err(ChannelSendError::ChannelError(self.status));
-        }
-
-        while !self.message_queue.is_empty() {
-            if let Err(e) = self.tx.send(self.message_queue.pop().unwrap()) {
-                return Err(ChannelSendError::SendError(e));
-            }
-        }
-
-        Ok(())
     }
 
     pub(crate) fn recieve(&mut self, message: RealtimeMessage) {
@@ -345,7 +332,7 @@ pub struct RealtimeChannelBuilder {
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
     broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
     presence_callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
-    tx: mpsc::Sender<RealtimeMessage>,
+    client_tx: futures_channel::mpsc::UnboundedSender<Message>,
 }
 
 impl RealtimeChannelBuilder {
@@ -360,7 +347,7 @@ impl RealtimeChannelBuilder {
             cdc_callbacks: Default::default(),
             broadcast_callbacks: Default::default(),
             presence_callbacks: Default::default(),
-            tx: client.get_channel_tx(),
+            client_tx: client.get_channel_tx(),
         }
     }
 
@@ -558,24 +545,29 @@ impl RealtimeChannelBuilder {
 
     /// Create the channel and pass ownership to provided [RealtimeClient], returning the channel
     /// id for later access through the client
-    pub fn build(self, client: &mut RealtimeClient) -> Uuid {
-        client.add_channel(RealtimeChannel {
-            topic: self.topic,
-            cdc_callbacks: self.cdc_callbacks,
-            broadcast_callbacks: self.broadcast_callbacks,
-            tx: self.tx,
-            status: ChannelState::Closed,
-            id: self.id,
-            join_payload: JoinPayload {
-                config: JoinConfig {
-                    broadcast: self.broadcast,
-                    presence: self.presence,
-                    postgres_changes: self.postgres_changes,
+    pub async fn build(self, client: &mut RealtimeClient) -> Uuid {
+        let (channel_tx, channel_rx) = futures_channel::mpsc::unbounded();
+
+        client
+            .add_channel(RealtimeChannel {
+                topic: self.topic,
+                cdc_callbacks: self.cdc_callbacks,
+                broadcast_callbacks: self.broadcast_callbacks,
+                client_tx: self.client_tx,
+                channel_tx,
+                channel_rx,
+                status: ChannelState::Closed,
+                id: self.id,
+                join_payload: JoinPayload {
+                    config: JoinConfig {
+                        broadcast: self.broadcast,
+                        presence: self.presence,
+                        postgres_changes: self.postgres_changes,
+                    },
+                    access_token: self.access_token,
                 },
-                access_token: self.access_token,
-            },
-            presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
-            message_queue: vec![],
-        })
+                presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
+            })
+            .await
     }
 }
