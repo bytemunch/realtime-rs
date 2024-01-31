@@ -70,6 +70,7 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
   - [ ] Socket R/W
   - [ ] Disconnect
   - [ ] Throttling
+  - [ ] Monitoring
 
  #### Examples
 
