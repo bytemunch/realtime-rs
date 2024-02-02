@@ -1,10 +1,7 @@
 use serde_json::Value;
-use tokio::{
-    sync::{
-        mpsc::{self, error::SendError},
-        Mutex,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{self, error::SendError, UnboundedReceiver, UnboundedSender},
+    Mutex,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -29,6 +26,12 @@ type CdcCallback = (
 );
 type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>) + Send>;
 
+pub enum ChannelControlMessage {
+    Subscribe,
+    Broadcast(BroadcastPayload),
+    ClientTx(UnboundedSender<Message>),
+}
+
 /// Channel states
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ChannelState {
@@ -42,6 +45,7 @@ pub enum ChannelState {
 /// Error for channel send failures
 #[derive(Debug)]
 pub enum ChannelSendError {
+    NoChannel,
     SendError(SendError<Message>),
     ChannelError(ChannelState),
 }
@@ -53,9 +57,14 @@ pub struct RealtimeChannel {
     pub(crate) id: Uuid,
     pub(crate) cdc_callbacks: Arc<Mutex<HashMap<PostgresChangesEvent, Vec<CdcCallback>>>>,
     pub(crate) broadcast_callbacks: Arc<Mutex<HashMap<String, Vec<BroadcastCallback>>>>,
-    client_tx: mpsc::UnboundedSender<Message>,
+    pub(crate) client_tx: mpsc::UnboundedSender<Message>,
     join_payload: JoinPayload,
     presence: RealtimePresence,
+    pub(crate) tx: Option<UnboundedSender<Message>>,
+    pub controller: (
+        UnboundedSender<ChannelControlMessage>,
+        UnboundedReceiver<ChannelControlMessage>,
+    ),
 }
 
 impl RealtimeChannel {
@@ -68,7 +77,7 @@ impl RealtimeChannel {
     }
 
     /// Send a join request to the channel
-    pub async fn subscribe(&mut self, client: &mut RealtimeClient) {
+    pub async fn subscribe(&mut self) {
         let join_message = RealtimeMessage {
             event: MessageEvent::PhxJoin,
             topic: self.topic.clone(),
@@ -81,16 +90,17 @@ impl RealtimeChannel {
         drop(state);
 
         let _ = self.send(join_message.into()).await;
+    }
 
-        // Start thread here!
-
+    pub async fn start_thread(&mut self) {
         let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
+        self.tx = Some(channel_tx);
         let thread_state = self.state.clone();
         let thread_cdc_cbs = self.cdc_callbacks.clone();
         let thread_bc_cbs = self.broadcast_callbacks.clone();
         let id = self.id;
 
-        let handle = tokio::spawn(async move {
+        let _ws_thread = tokio::spawn(async move {
             while let Some(message) = channel_rx.recv().await {
                 let message: RealtimeMessage =
                     serde_json::from_str(message.to_text().unwrap()).unwrap();
@@ -147,14 +157,24 @@ impl RealtimeChannel {
                 drop(cdc_callbacks);
             }
         });
+    }
 
-        client
-            .add_channel(self.id, self.topic.clone(), channel_tx, handle)
-            .await;
+    pub async fn run_controller(&mut self) {
+        // CONTROLLER
+
+        while let Some(control_message) = self.controller.1.recv().await {
+            match control_message {
+                ChannelControlMessage::Subscribe => self.subscribe().await,
+                ChannelControlMessage::Broadcast(payload) => {
+                    let _ = self.broadcast(payload).await;
+                }
+                ChannelControlMessage::ClientTx(tx) => self.client_tx = tx,
+            }
+        }
     }
 
     /// Leave the channel
-    pub async fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
+    async fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
         let state = self.state.clone();
         let mut state = state.lock().await;
         if *state == ChannelState::Closed || *state == ChannelState::Leaving {
@@ -255,7 +275,7 @@ impl RealtimeChannel {
     /// Helper function for sending broadcast messages
     ///```
     ///TODO CODE
-    pub async fn broadcast(&mut self, payload: BroadcastPayload) -> Result<(), ChannelSendError> {
+    async fn broadcast(&mut self, payload: BroadcastPayload) -> Result<(), ChannelSendError> {
         self.send(RealtimeMessage {
             event: MessageEvent::Broadcast,
             topic: "".into(),
@@ -597,12 +617,17 @@ impl RealtimeChannelBuilder {
 
     /// Create the channel and pass ownership to provided [RealtimeClient], returning the channel
     /// id for later access through the client
-    pub async fn build(self, client: &mut RealtimeClient) -> RealtimeChannel {
+    pub async fn build(
+        self,
+        client: &mut RealtimeClient,
+    ) -> UnboundedSender<ChannelControlMessage> {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
         let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
         let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks));
+        let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelControlMessage>();
 
-        RealtimeChannel {
+        let mut c = RealtimeChannel {
+            tx: None,
             topic: self.topic,
             cdc_callbacks,
             broadcast_callbacks,
@@ -618,6 +643,11 @@ impl RealtimeChannelBuilder {
                 access_token: self.access_token,
             },
             presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
-        }
+            controller: (controller_tx, controller_rx),
+        };
+
+        c.start_thread().await;
+
+        client.add_channel(c).await
     }
 }

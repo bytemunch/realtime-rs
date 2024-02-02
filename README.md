@@ -64,13 +64,13 @@ Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as
     > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
 
  #### Broken by Async:
-  - [ ] Autoreconnect
+  - [x] Autoreconnect
   - [ ] Block until subscribed
   - [ ] remove all channels
-  - [ ] Socket R/W
+  - [x] Socket R/W
   - [ ] Disconnect
   - [ ] Throttling
-  - [ ] Monitoring
+  - [x] Monitoring
 
  #### Examples
 

@@ -1,6 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
-use realtime_rs::{message::payload::BroadcastConfig, sync::RealtimeClient};
+use realtime_rs::{
+    message::payload::BroadcastConfig,
+    sync::{ChannelControlMessage, RealtimeClient},
+};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
@@ -13,7 +17,7 @@ async fn main() {
 
     let _ = client.connect().await;
 
-    let mut c = client
+    let c = client
         .channel("TestTopic")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
@@ -23,15 +27,25 @@ async fn main() {
         .build(&mut client)
         .await;
 
-    c.subscribe(&mut client).await;
+    let _ = c.send(ChannelControlMessage::Subscribe);
 
-    let payload = realtime_rs::message::payload::BroadcastPayload {
+    let mut payload = realtime_rs::message::payload::BroadcastPayload {
         event: "test_event".into(),
         payload: HashMap::new(),
         ..Default::default()
     };
 
-    let _ = c.broadcast(payload).await;
+    let mut count = 0;
+
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(2)).await;
+            count += 1;
+            println!("SENDING {}", count);
+            payload.payload.insert("count".into(), count.into());
+            let _ = c.send(ChannelControlMessage::Broadcast(payload.clone()));
+        }
+    });
 
     let _ = client.handle_incoming().await;
 

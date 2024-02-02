@@ -18,14 +18,24 @@ use uuid::Uuid;
 
 use futures_util::{pin_mut, StreamExt};
 
+use crate::message::payload::BroadcastPayload;
 use crate::message::RealtimeMessage;
 use crate::sync::realtime_channel::RealtimeChannel;
 use crate::DEBUG;
 
 use super::realtime_channel::RealtimeChannelBuilder;
-use super::{ChannelSendError, ChannelState};
+use super::{ChannelControlMessage, ChannelSendError, ChannelState};
 
-type ChannelList = HashMap<Uuid, (String, mpsc::UnboundedSender<Message>, JoinHandle<()>)>;
+// TODO this is enough for it's own struct.
+type ChannelList = HashMap<
+    Uuid,
+    (
+        String,
+        UnboundedSender<Message>,
+        UnboundedSender<ChannelControlMessage>,
+        JoinHandle<()>,
+    ),
+>;
 
 /// Error type for [RealtimeClient::sign_in_with_email_password()]
 #[derive(PartialEq, Debug)]
@@ -309,7 +319,7 @@ impl RealtimeClient {
 
             let recieve_thread = tokio::spawn(async move {
                 while let Some(msg) = read.next().await {
-                    if let Err(err) = msg {
+                    if let Err(_err) = msg {
                         println!("Disconnected!");
                         let mut state = recv_state.lock().await;
                         *state = ConnectionState::Reconnect;
@@ -329,11 +339,11 @@ impl RealtimeClient {
 
                     let list = channel_list.lock().await;
 
-                    for (_id, (topic, tx, _handle)) in &*list {
-                        if *topic != rt_msg.topic {
+                    for (_id, channel) in &*list {
+                        if *channel.0 != rt_msg.topic {
                             continue;
                         }
-                        let _ = tx.send(msg.clone());
+                        let _ = channel.1.send(msg.clone());
                     }
 
                     let _ = ws_rx_tx.send(msg);
@@ -362,23 +372,18 @@ impl RealtimeClient {
             self.ws_tx = Some(ws_tx_tx);
             self.ws_rx = Some(ws_rx_rx);
 
+            let mut channels = self.channels.lock().await;
+
+            for (_id, (_topic, _tx, control_tx, _handle)) in channels.iter_mut() {
+                let _ =
+                    control_tx.send(ChannelControlMessage::ClientTx(self.ws_tx.clone().unwrap()));
+                let _ = control_tx.send(ChannelControlMessage::Subscribe);
+            }
+
             break;
         }
 
         Ok(())
-
-        // UPDATE ALL REALTIMECHANNEL CLIENT_TXs
-    }
-
-    async fn reset_channel_threads(&mut self) {
-        let mut channels = self.channels.lock().await;
-
-        for (_id, (_topic, tx, handle)) in channels.iter_mut() {
-            *tx = self.ws_tx.clone().unwrap();
-            handle.abort();
-
-            // TODO recreate thread here????????
-        }
     }
 
     pub async fn handle_incoming(&mut self) {
@@ -399,13 +404,6 @@ impl RealtimeClient {
 
     pub async fn send(&mut self, msg: RealtimeMessage) -> Result<(), SendError<Message>> {
         self.ws_tx.as_mut().unwrap().send(msg.into())
-    }
-
-    pub async fn remove_channel(
-        &mut self,
-        mut channel: RealtimeChannel,
-    ) -> Result<ChannelState, ChannelSendError> {
-        channel.unsubscribe().await
     }
 
     /// Use provided JWT to authorize future requests from this client and all channels
@@ -436,16 +434,28 @@ impl RealtimeClient {
 
     pub(crate) async fn add_channel(
         &mut self,
-        id: Uuid,
-        topic: String,
-        tx: UnboundedSender<Message>,
-        handle: JoinHandle<()>,
-    ) {
+        mut channel: RealtimeChannel,
+    ) -> UnboundedSender<ChannelControlMessage> {
         let list = self.channels.clone();
 
         let mut list = list.lock().await;
 
-        list.insert(id, (topic.clone(), tx.clone(), handle));
+        // Ownership of channel passed to new thread here
+        // Controller TX retained by clone
+        // Controller TX can get and set channel tings
+        let topic = channel.topic.clone();
+        let channel_controller_tx = channel.controller.0.clone();
+        let channel_tx = channel.tx.clone().unwrap();
+        let id = channel.id;
+
+        let handle = tokio::spawn(async move { channel.run_controller().await });
+
+        list.insert(
+            id,
+            (topic, channel_tx, channel_controller_tx.clone(), handle),
+        );
+
+        channel_controller_tx
     }
 
     pub(crate) fn get_channel_tx(&self) -> mpsc::UnboundedSender<Message> {
