@@ -3,28 +3,29 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::{collections::HashMap, time::Duration};
 
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::error::{SendError, TryRecvError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Uri};
+use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Request, Uri};
 use tokio_tungstenite::tungstenite::Message;
 
 use uuid::Uuid;
 
 use futures_util::{pin_mut, StreamExt};
 
-use crate::message::payload::Payload;
 use crate::message::RealtimeMessage;
 use crate::sync::realtime_channel::RealtimeChannel;
 use crate::DEBUG;
 
 use super::realtime_channel::RealtimeChannelBuilder;
+use super::{ChannelSendError, ChannelState};
 
-type ChannelList = Vec<(String, mpsc::UnboundedSender<Message>)>;
+type ChannelList = HashMap<Uuid, (String, mpsc::UnboundedSender<Message>, JoinHandle<()>)>;
 
 /// Error type for [RealtimeClient::sign_in_with_email_password()]
 #[derive(PartialEq, Debug)]
@@ -138,20 +139,16 @@ enum MonitorSignal {
 #[derive(Default)]
 pub struct RealtimeClient {
     pub(crate) access_token: String,
-    status: ConnectionState,
+    state: Arc<Mutex<ConnectionState>>,
     ws_tx: Option<mpsc::UnboundedSender<Message>>,
     ws_rx: Option<mpsc::UnboundedReceiver<Message>>,
-    channel_tx_list: Arc<Mutex<ChannelList>>,
+    channels: Arc<Mutex<ChannelList>>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
-    // mpsc
-    monitor_channel: MonitorChannel,
     middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
-    // timers
-    reconnect_now: Option<SystemTime>,
-    reconnect_delay: Duration,
-    reconnect_attempts: usize,
-    heartbeat_now: Option<SystemTime>,
+    request: Request<()>,
+    // threads
+    join_handles: Vec<JoinHandle<()>>,
     // builder options
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
@@ -182,8 +179,9 @@ impl RealtimeClient {
     }
 
     /// Returns this client's [ConnectionState]
-    pub fn get_status(&self) -> ConnectionState {
-        self.status
+    pub async fn get_status(&self) -> ConnectionState {
+        let state = self.state.lock().await;
+        *state
     }
 
     /// Returns a new [RealtimeChannelBuilder] instantiated with the provided `topic`
@@ -197,6 +195,12 @@ impl RealtimeClient {
     /// TODO CODE
     /// ```
     pub async fn connect(&mut self) -> Result<&mut RealtimeClient, ConnectError> {
+        let _ = self.connect_ws().await;
+
+        Ok(self)
+    }
+
+    fn build_request(&self) -> Result<Request<()>, ConnectError> {
         let uri: Uri = match format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.access_token
@@ -254,75 +258,142 @@ impl RealtimeClient {
 
         headers.extend(self.headers.clone());
 
-        if DEBUG {
-            println!("Connecting... Req: {:?}\n", request);
+        Ok(request)
+    }
+
+    async fn connect_ws(&mut self) -> Result<(), ConnectError> {
+        // Clear current threads
+        for t in &mut self.join_handles {
+            t.abort();
         }
 
-        let (ws_tx_tx, ws_tx_rx) = mpsc::unbounded_channel();
-        let (ws_rx_tx, ws_rx_rx) = mpsc::unbounded_channel();
+        self.join_handles.clear();
 
-        let (ws_stream, _) = connect_async(request).await.expect("Failed to connect");
-        println!("WebSocket handshake has been successfully completed");
+        let request = self.build_request()?;
 
-        let (write, mut read) = ws_stream.split();
+        let mut reconnect_attempts = 0;
+        loop {
+            // change all channel client_tx to new ones?
 
-        let _send_thread = tokio::spawn(async move {
-            let sender = UnboundedReceiverStream::new(ws_tx_rx)
-                .map(|x| {
-                    println!("[SEND] {:?}", x);
-                    Ok(x)
-                })
-                .forward(write);
-            pin_mut!(sender);
-            let _ = sender.await;
-        });
+            let (ws_tx_tx, ws_tx_rx) = mpsc::unbounded_channel();
+            let (ws_rx_tx, ws_rx_rx) = mpsc::unbounded_channel();
 
-        let channel_list = self.channel_tx_list.clone();
+            let Ok((ws_stream, _res)) = connect_async(request.clone()).await else {
+                reconnect_attempts += 1;
+                println!(
+                    "Connection failed. Retrying (attempt #{})",
+                    reconnect_attempts
+                );
+                sleep(self.reconnect_interval.0(reconnect_attempts)).await;
+                continue;
+            };
 
-        let _recieve_thread = tokio::spawn(async move {
-            while let Some(msg) = read.next().await {
-                let Ok(rt_msg) = serde_json::from_str::<RealtimeMessage>(
-                    msg.as_ref().unwrap().to_text().unwrap(),
-                ) else {
-                    continue;
-                };
+            println!("WebSocket handshake has been successfully completed");
 
-                let Ok(msg) = msg else {
-                    continue;
-                };
+            let (write, mut read) = ws_stream.split();
 
-                let list = channel_list.lock().await;
+            let send_thread = tokio::spawn(async move {
+                let sender = UnboundedReceiverStream::new(ws_tx_rx)
+                    .map(|x| {
+                        // TODO encode here
+                        println!("[SEND] {:?}", x);
+                        Ok(x)
+                    })
+                    .forward(write);
+                pin_mut!(sender);
+                let _ = sender.await;
+            });
 
-                let list: &ChannelList = list.as_ref();
+            let channel_list = self.channels.clone();
+            let recv_state = self.state.clone();
 
-                for (topic, tx) in list {
-                    if *topic != rt_msg.topic {
+            let recieve_thread = tokio::spawn(async move {
+                while let Some(msg) = read.next().await {
+                    if let Err(err) = msg {
+                        println!("Disconnected!");
+                        let mut state = recv_state.lock().await;
+                        *state = ConnectionState::Reconnect;
                         continue;
                     }
-                    let _ = tx.send(msg.clone());
+                    // TODO decode here
+                    let Ok(rt_msg) = serde_json::from_str::<RealtimeMessage>(
+                        msg.as_ref().unwrap().to_text().unwrap(), // TODO error handling here,
+                                                                  // disconnect detect
+                    ) else {
+                        continue;
+                    };
+
+                    let Ok(msg) = msg else {
+                        continue;
+                    };
+
+                    let list = channel_list.lock().await;
+
+                    for (_id, (topic, tx, _handle)) in &*list {
+                        if *topic != rt_msg.topic {
+                            continue;
+                        }
+                        let _ = tx.send(msg.clone());
+                    }
+
+                    let _ = ws_rx_tx.send(msg);
                 }
+            });
 
-                let _ = ws_rx_tx.send(msg);
+            let hb_tx = ws_tx_tx.clone();
+            let hb_ivl = self.heartbeat_interval.clone(); // TODO heartbeat interval can be moved here,
+                                                          // no need to keep on RealtimeClient
+            let heartbeat_thread = tokio::spawn(async move {
+                loop {
+                    sleep(hb_ivl).await;
+                    let _ = hb_tx.send(RealtimeMessage::heartbeat().into());
+                }
+            });
+
+            {
+                let mut state = self.state.lock().await;
+                *state = ConnectionState::Open;
             }
-        });
 
-        self.status = ConnectionState::Open;
+            self.join_handles.push(send_thread);
+            self.join_handles.push(recieve_thread);
+            self.join_handles.push(heartbeat_thread);
 
-        self.ws_tx = Some(ws_tx_tx);
-        self.ws_rx = Some(ws_rx_rx);
+            self.ws_tx = Some(ws_tx_tx);
+            self.ws_rx = Some(ws_rx_rx);
 
-        let _ = self
-            .ws_tx
-            .as_mut()
-            .unwrap()
-            .send(RealtimeMessage::heartbeat().into());
+            break;
+        }
 
-        Ok(self)
+        Ok(())
+
+        // UPDATE ALL REALTIMECHANNEL CLIENT_TXs
+    }
+
+    async fn reset_channel_threads(&mut self) {
+        let mut channels = self.channels.lock().await;
+
+        for (_id, (_topic, tx, handle)) in channels.iter_mut() {
+            *tx = self.ws_tx.clone().unwrap();
+            handle.abort();
+
+            // TODO recreate thread here????????
+        }
     }
 
     pub async fn handle_incoming(&mut self) {
-        while let Some(msg) = self.ws_rx.as_mut().unwrap().recv().await {
-            println!("[RECV] {:?}", msg);
+        loop {
+            while let Some(msg) = self.ws_rx.as_mut().unwrap().recv().await {
+                println!("[RECV] {:?}", msg);
+            }
+
+            let mut state = self.state.lock().await;
+            if *state == ConnectionState::Reconnect {
+                println!("Reconnecting...");
+                *state = ConnectionState::Reconnecting;
+                drop(state);
+                let _ = self.connect_ws().await;
+            }
         }
     }
 
@@ -330,13 +401,11 @@ impl RealtimeClient {
         self.ws_tx.as_mut().unwrap().send(msg.into())
     }
 
-    /// Returns [Some(RealtimeChannel)] if channel was successfully removed, [None] if the channel
-    /// was not found.
     pub async fn remove_channel(
         &mut self,
         mut channel: RealtimeChannel,
-    ) -> Result<super::ChannelState, super::ChannelSendError> {
-        channel.unsubscribe()
+    ) -> Result<ChannelState, ChannelSendError> {
+        channel.unsubscribe().await
     }
 
     /// Use provided JWT to authorize future requests from this client and all channels
@@ -365,60 +434,18 @@ impl RealtimeClient {
         self
     }
 
-    pub(crate) async fn add_channel(&mut self, channel: RealtimeChannel) -> RealtimeChannel {
-        let list = self.channel_tx_list.clone();
+    pub(crate) async fn add_channel(
+        &mut self,
+        id: Uuid,
+        topic: String,
+        tx: UnboundedSender<Message>,
+        handle: JoinHandle<()>,
+    ) {
+        let list = self.channels.clone();
 
         let mut list = list.lock().await;
 
-        let list: &mut ChannelList = list.as_mut();
-
-        let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
-
-        let b_cb = channel.broadcast_callbacks.clone();
-        let cdc_cb = channel.cdc_callbacks.clone();
-
-        tokio::spawn(async move {
-            while let Some(message) = channel_rx.recv().await {
-                let message: RealtimeMessage =
-                    serde_json::from_str(message.to_text().unwrap()).unwrap();
-
-                // get locks
-                let mut b_cb = b_cb.lock().await;
-                let mut cdc_cb = cdc_cb.lock().await;
-
-                let test_message = message.clone(); // TODO fix dis
-
-                match message.payload {
-                    Payload::Broadcast(payload) => {
-                        if let Some(cb_vec) = b_cb.get_mut(&payload.event) {
-                            for cb in cb_vec {
-                                cb(&payload.payload);
-                            }
-                        }
-                    }
-                    Payload::PostgresChanges(payload) => {
-                        if let Some(cb_vec) = cdc_cb.get_mut(&payload.data.change_type) {
-                            for cb in cb_vec {
-                                if cb.0.check(test_message.clone()).is_none() {
-                                    continue;
-                                }
-                                cb.1(&payload);
-                            }
-                        }
-                    }
-                    _ => {
-                        println!("Unmatched payload ;_;")
-                    }
-                }
-
-                drop(b_cb);
-                drop(cdc_cb);
-            }
-        });
-
-        list.push((channel.topic.clone(), channel_tx.clone()));
-
-        channel
+        list.insert(id, (topic.clone(), tx.clone(), handle));
     }
 
     pub(crate) fn get_channel_tx(&self) -> mpsc::UnboundedSender<Message> {
@@ -430,25 +457,6 @@ impl RealtimeClient {
             message = middleware(message)
         }
         message
-    }
-
-    fn run_heartbeat(&mut self) {
-        if self.heartbeat_now.is_none() {
-            self.heartbeat_now = Some(SystemTime::now());
-        }
-
-        if self.heartbeat_now.unwrap() + self.heartbeat_interval > SystemTime::now() {
-            return;
-        }
-
-        self.heartbeat_now.take();
-
-        let _ = self.send(RealtimeMessage::heartbeat());
-    }
-
-    fn reconnect(&mut self) {
-        self.status = ConnectionState::Reconnect;
-        let _ = self.monitor_channel.0 .0.send(MonitorSignal::Reconnect);
     }
 }
 

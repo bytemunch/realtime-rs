@@ -23,7 +23,7 @@ async fn main() {
         .build(&mut client)
         .await;
 
-    c.subscribe();
+    c.subscribe(&mut client).await;
 
     let payload = realtime_rs::message::payload::BroadcastPayload {
         event: "test_event".into(),
@@ -31,7 +31,7 @@ async fn main() {
         ..Default::default()
     };
 
-    let _ = c.broadcast(payload);
+    let _ = c.broadcast(payload).await;
 
     let _ = client.handle_incoming().await;
 

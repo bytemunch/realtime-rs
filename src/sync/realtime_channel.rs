@@ -1,22 +1,22 @@
 use serde_json::Value;
-use tokio::sync::{
-    mpsc::{self, error::SendError},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, error::SendError},
+        Mutex,
+    },
+    task::JoinHandle,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
-use crate::{
-    message::{
-        payload::{
-            AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload,
-            Payload, PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
-            PresenceConfig,
-        },
-        presence::{PresenceCallback, PresenceEvent, PresenceState},
-        MessageEvent, PostgresChangeFilter, RealtimeMessage,
+use crate::message::{
+    payload::{
+        AccessTokenPayload, BroadcastConfig, BroadcastPayload, JoinConfig, JoinPayload, Payload,
+        PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
+        PresenceConfig,
     },
-    DEBUG,
+    presence::{PresenceCallback, PresenceEvent, PresenceState},
+    MessageEvent, PostgresChangeFilter, RealtimeMessage,
 };
 
 use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
@@ -49,7 +49,7 @@ pub enum ChannelSendError {
 /// Channel structure
 pub struct RealtimeChannel {
     pub(crate) topic: String,
-    pub(crate) status: ChannelState,
+    pub(crate) state: Arc<Mutex<ChannelState>>,
     pub(crate) id: Uuid,
     pub(crate) cdc_callbacks: Arc<Mutex<HashMap<PostgresChangesEvent, Vec<CdcCallback>>>>,
     pub(crate) broadcast_callbacks: Arc<Mutex<HashMap<String, Vec<BroadcastCallback>>>>,
@@ -58,17 +58,17 @@ pub struct RealtimeChannel {
     presence: RealtimePresence,
 }
 
-// TODO channel options with broadcast + presence settings
-
 impl RealtimeChannel {
     /// Returns the channel's connection state
-    pub fn get_status(&self) -> ChannelState {
-        self.status
+    pub async fn get_status(&self) -> ChannelState {
+        let state = self.state.lock().await;
+        let s = state.clone();
+        drop(state);
+        s
     }
 
     /// Send a join request to the channel
-    /// Does not block, for blocking behaviour use [RealtimeClient::block_until_subscribed()]
-    pub fn subscribe(&mut self) {
+    pub async fn subscribe(&mut self, client: &mut RealtimeClient) {
         let join_message = RealtimeMessage {
             event: MessageEvent::PhxJoin,
             topic: self.topic.clone(),
@@ -76,26 +76,104 @@ impl RealtimeChannel {
             message_ref: Some(self.id.into()),
         };
 
-        self.status = ChannelState::Joining;
+        let mut state = self.state.lock().await;
+        *state = ChannelState::Joining;
+        drop(state);
 
-        let _ = self.send(join_message.into());
+        let _ = self.send(join_message.into()).await;
+
+        // Start thread here!
+
+        let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
+        let thread_state = self.state.clone();
+        let thread_cdc_cbs = self.cdc_callbacks.clone();
+        let thread_bc_cbs = self.broadcast_callbacks.clone();
+        let id = self.id;
+
+        let handle = tokio::spawn(async move {
+            while let Some(message) = channel_rx.recv().await {
+                let message: RealtimeMessage =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap();
+
+                // get locks
+                let mut broadcast_callbacks = thread_bc_cbs.lock().await;
+                let mut cdc_callbacks = thread_cdc_cbs.lock().await;
+
+                let test_message = message.clone(); // TODO fix dis
+
+                match message.payload {
+                    Payload::Broadcast(payload) => {
+                        if let Some(cb_vec) = broadcast_callbacks.get_mut(&payload.event) {
+                            for cb in cb_vec {
+                                cb(&payload.payload);
+                            }
+                        }
+                    }
+                    Payload::PostgresChanges(payload) => {
+                        if let Some(cb_vec) = cdc_callbacks.get_mut(&payload.data.change_type) {
+                            for cb in cb_vec {
+                                if cb.0.check(test_message.clone()).is_none() {
+                                    continue;
+                                }
+                                cb.1(&payload);
+                            }
+                        }
+                        if let Some(cb_vec) = cdc_callbacks.get_mut(&PostgresChangesEvent::All) {
+                            for cb in cb_vec {
+                                if cb.0.check(test_message.clone()).is_none() {
+                                    continue;
+                                }
+                                cb.1(&payload);
+                            }
+                        }
+                    }
+                    Payload::Response(join_response) => {
+                        let target_id = message.message_ref.clone().unwrap_or("".to_string());
+                        if target_id != id.to_string() {
+                            return;
+                        }
+                        if join_response.status == PayloadStatus::Ok {
+                            let mut channel_state = thread_state.lock().await;
+                            *channel_state = ChannelState::Joined;
+                            drop(channel_state);
+                        }
+                    }
+                    _ => {
+                        println!("Unmatched payload ;_;")
+                    }
+                }
+
+                drop(broadcast_callbacks);
+                drop(cdc_callbacks);
+            }
+        });
+
+        client
+            .add_channel(self.id, self.topic.clone(), channel_tx, handle)
+            .await;
     }
 
     /// Leave the channel
-    pub fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
-        if self.status == ChannelState::Closed || self.status == ChannelState::Leaving {
-            return Ok(self.status);
+    pub async fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
+        let state = self.state.clone();
+        let mut state = state.lock().await;
+        if *state == ChannelState::Closed || *state == ChannelState::Leaving {
+            let s = state.clone();
+            return Ok(s);
         }
 
-        match self.send(RealtimeMessage {
-            event: MessageEvent::PhxLeave,
-            topic: self.topic.clone(),
-            payload: Payload::Empty {},
-            message_ref: Some(format!("{}+leave", self.id)),
-        }) {
+        match self
+            .send(RealtimeMessage {
+                event: MessageEvent::PhxLeave,
+                topic: self.topic.clone(),
+                payload: Payload::Empty {},
+                message_ref: Some(format!("{}+leave", self.id)),
+            })
+            .await
+        {
             Ok(()) => {
-                self.status = ChannelState::Leaving;
-                Ok(self.status)
+                *state = ChannelState::Leaving;
+                Ok(*state)
             }
             Err(ChannelSendError::ChannelError(status)) => Ok(status),
             Err(e) => Err(e),
@@ -157,13 +235,15 @@ impl RealtimeChannel {
     }
 
     /// Send a [RealtimeMessage] on this channel
-    pub fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
+    pub async fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
         // inject channel topic to message here
         let mut message = message.clone();
         message.topic = self.topic.clone();
 
-        if self.status == ChannelState::Leaving {
-            return Err(ChannelSendError::ChannelError(self.status));
+        let state = self.state.lock().await;
+
+        if *state == ChannelState::Leaving {
+            return Err(ChannelSendError::ChannelError(state.clone()));
         }
 
         match self.client_tx.send(message.into()) {
@@ -174,56 +254,27 @@ impl RealtimeChannel {
 
     /// Helper function for sending broadcast messages
     ///```
-    /// # use std::{collections::HashMap, env};
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # use realtime_rs::message::payload::*;  
-    /// # fn main() -> Result<(), ()> {
-    /// #   let url = "http://127.0.0.1:54321";
-    /// #   let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    /// #   let mut client = RealtimeClient::builder(url, anon_key).build();
-    /// #   let _ = client.connect();
-    /// #   let channel = client // TODO broadcast self true
-    /// #       .channel("topic")
-    /// #       .build(&mut client);
-    /// #
-    /// #  let _ = client.block_until_subscribed(channel).unwrap();
-    /// #
-    ///    let mut payload = HashMap::new();
-    ///    payload.insert("message".into(), "hello, broadcast!".into());
-    ///
-    ///    let message = BroadcastPayload::new("event", payload);
-    ///
-    ///    let _ = client.get_channel_mut(channel).unwrap().broadcast(message);
-    /// #
-    /// #   loop {
-    /// #       match client.next_message() {
-    /// #           Ok(_) => {
-    /// #               return Ok(()); // TODO test: return OK when we recieve the broadcast
-    /// #           }
-    /// #           Err(NextMessageError::WouldBlock) => {}
-    /// #           Err(_e) => {
-    /// #               return Err(());
-    /// #           }
-    /// #       }
-    /// #   }
-    /// # }
-    pub fn broadcast(&mut self, payload: BroadcastPayload) -> Result<(), ChannelSendError> {
+    ///TODO CODE
+    pub async fn broadcast(&mut self, payload: BroadcastPayload) -> Result<(), ChannelSendError> {
         self.send(RealtimeMessage {
             event: MessageEvent::Broadcast,
             topic: "".into(),
             payload: Payload::Broadcast(payload),
             message_ref: None,
         })
+        .await
     }
 
-    pub(crate) fn set_auth(&mut self, access_token: String) -> Result<(), ChannelSendError> {
+    pub(crate) async fn set_auth(&mut self, access_token: String) -> Result<(), ChannelSendError> {
         self.join_payload.access_token = access_token.clone();
 
-        if self.status != ChannelState::Joined {
+        let state = self.state.lock().await;
+
+        if *state != ChannelState::Joined {
             return Ok(());
         }
+
+        drop(state);
 
         let access_token_message = RealtimeMessage {
             event: MessageEvent::AccessToken,
@@ -232,7 +283,7 @@ impl RealtimeChannel {
             ..Default::default()
         };
 
-        self.send(access_token_message)
+        self.send(access_token_message).await
     }
 
     // pub(crate) fn recieve(&mut self, message: RealtimeMessage) {
@@ -547,24 +598,26 @@ impl RealtimeChannelBuilder {
     /// Create the channel and pass ownership to provided [RealtimeClient], returning the channel
     /// id for later access through the client
     pub async fn build(self, client: &mut RealtimeClient) -> RealtimeChannel {
-        client
-            .add_channel(RealtimeChannel {
-                topic: self.topic,
-                cdc_callbacks: Arc::new(Mutex::new(self.cdc_callbacks)),
-                broadcast_callbacks: Arc::new(Mutex::new(self.broadcast_callbacks)),
-                client_tx: self.client_tx,
-                status: ChannelState::Closed,
-                id: self.id,
-                join_payload: JoinPayload {
-                    config: JoinConfig {
-                        broadcast: self.broadcast,
-                        presence: self.presence,
-                        postgres_changes: self.postgres_changes,
-                    },
-                    access_token: self.access_token,
+        let state = Arc::new(Mutex::new(ChannelState::Closed));
+        let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
+        let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks));
+
+        RealtimeChannel {
+            topic: self.topic,
+            cdc_callbacks,
+            broadcast_callbacks,
+            client_tx: self.client_tx,
+            state,
+            id: self.id,
+            join_payload: JoinPayload {
+                config: JoinConfig {
+                    broadcast: self.broadcast,
+                    presence: self.presence,
+                    postgres_changes: self.postgres_changes,
                 },
-                presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
-            })
-            .await
+                access_token: self.access_token,
+            },
+            presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
+        }
     }
 }
