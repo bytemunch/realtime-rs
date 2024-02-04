@@ -24,7 +24,7 @@ use crate::sync::realtime_channel::RealtimeChannel;
 use crate::DEBUG;
 
 use super::realtime_channel::RealtimeChannelBuilder;
-use super::{ChannelControlMessage, ChannelSendError, ChannelState};
+use super::{ChannelControlMessage, ChannelController, ChannelSendError, ChannelState};
 
 // TODO this is enough for it's own struct.
 type ChannelList = HashMap<
@@ -32,7 +32,7 @@ type ChannelList = HashMap<
     (
         String,
         UnboundedSender<Message>,
-        UnboundedSender<ChannelControlMessage>,
+        ChannelController,
         JoinHandle<()>,
     ),
 >;
@@ -127,23 +127,11 @@ impl Default for MessageChannel {
     }
 }
 
-struct MonitorChannel(
-    (
-        UnboundedSender<MonitorSignal>,
-        UnboundedReceiver<MonitorSignal>,
-    ),
-);
-
-impl Default for MonitorChannel {
-    fn default() -> Self {
-        Self(mpsc::unbounded_channel())
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum MonitorSignal {
-    Reconnect,
-}
+// TODO CONTROLLER HERE
+// interfaces with client same way channel works
+// Builder::build() returns controller
+// and pops the actual client on a thread
+// controller should hold thread handle
 
 /// Synchronous websocket client that interfaces with Supabase Realtime
 #[derive(Default)]
@@ -432,10 +420,7 @@ impl RealtimeClient {
         self
     }
 
-    pub(crate) async fn add_channel(
-        &mut self,
-        mut channel: RealtimeChannel,
-    ) -> UnboundedSender<ChannelControlMessage> {
+    pub(crate) async fn add_channel(&mut self, mut channel: RealtimeChannel) -> ChannelController {
         let list = self.channels.clone();
 
         let mut list = list.lock().await;
@@ -444,18 +429,17 @@ impl RealtimeClient {
         // Controller TX retained by clone
         // Controller TX can get and set channel tings
         let topic = channel.topic.clone();
-        let channel_controller_tx = channel.controller.0.clone();
+        let channel_controller = ChannelController {
+            tx: channel.controller.0.clone(),
+        };
         let channel_tx = channel.tx.clone().unwrap();
         let id = channel.id;
 
-        let handle = tokio::spawn(async move { channel.run_controller().await });
+        let handle = tokio::spawn(async move { channel.controller_recv().await });
 
-        list.insert(
-            id,
-            (topic, channel_tx, channel_controller_tx.clone(), handle),
-        );
+        list.insert(id, (topic, channel_tx, channel_controller.clone(), handle));
 
-        channel_controller_tx
+        channel_controller
     }
 
     pub(crate) fn get_channel_tx(&self) -> mpsc::UnboundedSender<Message> {

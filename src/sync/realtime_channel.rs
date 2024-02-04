@@ -17,8 +17,8 @@ use crate::message::{
 };
 
 use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
-use std::fmt::Debug;
 use std::{collections::HashMap, sync::Arc};
+use std::{fmt::Debug, io::Error};
 
 type CdcCallback = (
     PostgresChangeFilter,
@@ -28,6 +28,7 @@ type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>) + Send>;
 
 pub enum ChannelControlMessage {
     Subscribe,
+    SubscribeBlocking,
     Broadcast(BroadcastPayload),
     ClientTx(UnboundedSender<Message>),
 }
@@ -50,6 +51,34 @@ pub enum ChannelSendError {
     ChannelError(ChannelState),
 }
 
+#[derive(Clone)]
+pub struct ChannelController {
+    pub(crate) tx: UnboundedSender<ChannelControlMessage>,
+}
+
+// TODO rethink where channel state is kept. Maybe keep it on the client?
+
+impl ChannelController {
+    pub fn send(
+        &self,
+        message: ChannelControlMessage,
+    ) -> Result<(), SendError<ChannelControlMessage>> {
+        self.tx.send(message)
+    }
+    pub fn subscribe(&self) -> Result<(), SendError<ChannelControlMessage>> {
+        self.send(ChannelControlMessage::Subscribe)
+    }
+    pub fn subscribe_blocking(&self) -> Result<(), SendError<ChannelControlMessage>> {
+        self.send(ChannelControlMessage::SubscribeBlocking)
+    }
+    pub fn broadcast(
+        &self,
+        payload: BroadcastPayload,
+    ) -> Result<(), SendError<ChannelControlMessage>> {
+        self.send(ChannelControlMessage::Broadcast(payload))
+    }
+}
+
 /// Channel structure
 pub struct RealtimeChannel {
     pub(crate) topic: String,
@@ -68,16 +97,23 @@ pub struct RealtimeChannel {
 }
 
 impl RealtimeChannel {
-    /// Returns the channel's connection state
-    pub async fn get_status(&self) -> ChannelState {
-        let state = self.state.lock().await;
-        let s = state.clone();
-        drop(state);
-        s
+    pub(crate) async fn controller_recv(&mut self) {
+        while let Some(control_message) = self.controller.1.recv().await {
+            match control_message {
+                ChannelControlMessage::Subscribe => self.subscribe().await,
+                ChannelControlMessage::SubscribeBlocking => {
+                    let _ = self.subscribe_blocking().await;
+                }
+                ChannelControlMessage::Broadcast(payload) => {
+                    let _ = self.broadcast(payload).await;
+                }
+                ChannelControlMessage::ClientTx(tx) => self.client_tx = tx,
+            }
+        }
     }
 
     /// Send a join request to the channel
-    pub async fn subscribe(&mut self) {
+    async fn subscribe(&mut self) {
         let join_message = RealtimeMessage {
             event: MessageEvent::PhxJoin,
             topic: self.topic.clone(),
@@ -92,7 +128,21 @@ impl RealtimeChannel {
         let _ = self.send(join_message.into()).await;
     }
 
-    pub async fn start_thread(&mut self) {
+    async fn subscribe_blocking(&mut self) -> Result<(), Error> {
+        self.subscribe().await;
+
+        loop {
+            println!("waiting for subscription...");
+            let state = self.state.lock().await;
+            if *state == ChannelState::Joined {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn start_thread(&mut self) {
         let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
         self.tx = Some(channel_tx);
         let thread_state = self.state.clone();
@@ -159,20 +209,6 @@ impl RealtimeChannel {
         });
     }
 
-    pub async fn run_controller(&mut self) {
-        // CONTROLLER
-
-        while let Some(control_message) = self.controller.1.recv().await {
-            match control_message {
-                ChannelControlMessage::Subscribe => self.subscribe().await,
-                ChannelControlMessage::Broadcast(payload) => {
-                    let _ = self.broadcast(payload).await;
-                }
-                ChannelControlMessage::ClientTx(tx) => self.client_tx = tx,
-            }
-        }
-    }
-
     /// Leave the channel
     async fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
         let state = self.state.clone();
@@ -201,7 +237,7 @@ impl RealtimeChannel {
     }
 
     /// Returns the current [PresenceState] of the channel
-    pub fn presence_state(&self) -> PresenceState {
+    fn presence_state(&self) -> PresenceState {
         self.presence.state.clone()
     }
 
@@ -233,7 +269,7 @@ impl RealtimeChannel {
     ///         .track(HashMap::new());
     /// #   Ok(())
     /// #   }
-    pub fn track(&mut self, payload: HashMap<String, Value>) -> &mut RealtimeChannel {
+    fn track(&mut self, payload: HashMap<String, Value>) -> &mut RealtimeChannel {
         let _ = self.send(RealtimeMessage {
             event: MessageEvent::Presence,
             topic: self.topic.clone(),
@@ -245,7 +281,7 @@ impl RealtimeChannel {
     }
 
     /// Sends a message to stop tracking this channel's presence
-    pub fn untrack(&mut self) {
+    fn untrack(&mut self) {
         let _ = self.send(RealtimeMessage {
             event: MessageEvent::Untrack,
             topic: self.topic.clone(),
@@ -255,7 +291,7 @@ impl RealtimeChannel {
     }
 
     /// Send a [RealtimeMessage] on this channel
-    pub async fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
+    async fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
         // inject channel topic to message here
         let mut message = message.clone();
         message.topic = self.topic.clone();
@@ -617,10 +653,7 @@ impl RealtimeChannelBuilder {
 
     /// Create the channel and pass ownership to provided [RealtimeClient], returning the channel
     /// id for later access through the client
-    pub async fn build(
-        self,
-        client: &mut RealtimeClient,
-    ) -> UnboundedSender<ChannelControlMessage> {
+    pub async fn build(self, client: &mut RealtimeClient) -> ChannelController {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
         let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
         let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks));

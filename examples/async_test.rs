@@ -27,7 +27,7 @@ async fn main() {
         .build(&mut client)
         .await;
 
-    let _ = c.send(ChannelControlMessage::Subscribe);
+    let _ = c.subscribe_blocking();
 
     let mut payload = realtime_rs::message::payload::BroadcastPayload {
         event: "test_event".into(),
