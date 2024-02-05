@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use realtime_rs::{
     message::payload::BroadcastConfig,
-    sync::{ChannelControlMessage, RealtimeClient},
+    sync::{ChannelManagerMessage, RealtimeChannelBuilder, RealtimeClient},
 };
 use tokio::time::sleep;
 
@@ -11,23 +11,24 @@ async fn main() {
     let endpoint = "http://127.0.0.1:54321";
     let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
 
-    let mut client = RealtimeClient::builder(endpoint, access_token)
-        .heartbeat_interval(Duration::from_secs(1))
-        .build();
+    let client = RealtimeClient::builder(endpoint, access_token)
+        .heartbeat_interval(Duration::from_secs(29))
+        .build()
+        .await;
 
-    let _ = client.connect().await;
+    client.connect().await;
 
-    let c = client
-        .channel("TestTopic")
+    let channel = RealtimeChannelBuilder::new("TestTopic")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
             ack: false,
         })
         .on_broadcast("test_event", |map| println!("Event get! {:?}", map))
-        .build(&mut client)
-        .await;
+        .build(client.clone())
+        .await
+        .unwrap();
 
-    let _ = c.subscribe_blocking();
+    let _ = channel.subscribe();
 
     let mut payload = realtime_rs::message::payload::BroadcastPayload {
         event: "test_event".into(),
@@ -39,15 +40,15 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_secs(2)).await;
             count += 1;
             println!("SENDING {}", count);
             payload.payload.insert("count".into(), count.into());
-            let _ = c.send(ChannelControlMessage::Broadcast(payload.clone()));
+            let _ = channel.send(ChannelManagerMessage::Broadcast {
+                payload: payload.clone(),
+            });
+            sleep(Duration::from_millis(1000)).await;
         }
-    });
-
-    let _ = client.handle_incoming().await;
-
-    println!("client closed.");
+    })
+    .await
+    .unwrap();
 }

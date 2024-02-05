@@ -1,7 +1,11 @@
 use serde_json::Value;
-use tokio::sync::{
-    mpsc::{self, error::SendError, UnboundedReceiver, UnboundedSender},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, error::SendError, UnboundedReceiver, UnboundedSender},
+        oneshot::{self, error::RecvError},
+        Mutex,
+    },
+    task::JoinHandle,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -16,22 +20,17 @@ use crate::message::{
     MessageEvent, PostgresChangeFilter, RealtimeMessage,
 };
 
-use crate::sync::{realtime_client::RealtimeClient, realtime_presence::RealtimePresence};
+use crate::sync::realtime_presence::RealtimePresence;
+use std::fmt::Debug;
 use std::{collections::HashMap, sync::Arc};
-use std::{fmt::Debug, io::Error};
+
+use super::{ClientManager, Responder};
 
 type CdcCallback = (
     PostgresChangeFilter,
     Box<dyn FnMut(&PostgresChangesPayload) + Send>,
 );
 type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>) + Send>;
-
-pub enum ChannelControlMessage {
-    Subscribe,
-    SubscribeBlocking,
-    Broadcast(BroadcastPayload),
-    ClientTx(UnboundedSender<Message>),
-}
 
 /// Channel states
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -51,31 +50,72 @@ pub enum ChannelSendError {
     ChannelError(ChannelState),
 }
 
+pub enum ChannelManagerMessage {
+    Subscribe,
+    SubscribeBlocking {
+        res: Responder<()>,
+    },
+    Broadcast {
+        payload: BroadcastPayload,
+    },
+    ClientTx {
+        new_tx: UnboundedSender<Message>,
+        res: Responder<()>,
+    },
+    State {
+        res: Responder<ChannelState>,
+    },
+    GetTx {
+        res: Responder<UnboundedSender<Message>>,
+    },
+    GetTopic {
+        res: Responder<String>,
+    },
+}
+
 #[derive(Clone)]
-pub struct ChannelController {
-    pub(crate) tx: UnboundedSender<ChannelControlMessage>,
+pub struct ChannelManager {
+    pub(crate) tx: UnboundedSender<ChannelManagerMessage>,
 }
 
 // TODO rethink where channel state is kept. Maybe keep it on the client?
 
-impl ChannelController {
+impl ChannelManager {
+    pub fn oneshot<T>() -> (oneshot::Sender<T>, oneshot::Receiver<T>) {
+        // TODO does this really save enough keystrokes? maybe abstracted early here
+        oneshot::channel::<T>()
+    }
     pub fn send(
         &self,
-        message: ChannelControlMessage,
-    ) -> Result<(), SendError<ChannelControlMessage>> {
+        message: ChannelManagerMessage,
+    ) -> Result<(), SendError<ChannelManagerMessage>> {
         self.tx.send(message)
     }
-    pub fn subscribe(&self) -> Result<(), SendError<ChannelControlMessage>> {
-        self.send(ChannelControlMessage::Subscribe)
+    pub fn subscribe(&self) {
+        let _ = self.send(ChannelManagerMessage::Subscribe);
     }
-    pub fn subscribe_blocking(&self) -> Result<(), SendError<ChannelControlMessage>> {
-        self.send(ChannelControlMessage::SubscribeBlocking)
+    pub async fn subscribe_blocking(&self) -> Result<(), oneshot::error::RecvError> {
+        let (tx, rx) = Self::oneshot();
+        let _ = self.send(ChannelManagerMessage::SubscribeBlocking { res: tx });
+        rx.await
     }
-    pub fn broadcast(
-        &self,
-        payload: BroadcastPayload,
-    ) -> Result<(), SendError<ChannelControlMessage>> {
-        self.send(ChannelControlMessage::Broadcast(payload))
+    pub fn broadcast(&self, payload: BroadcastPayload) {
+        let _ = self.send(ChannelManagerMessage::Broadcast { payload });
+    }
+    pub async fn state(&self) -> ChannelState {
+        let (tx, rx) = Self::oneshot::<ChannelState>();
+        let _ = self.send(ChannelManagerMessage::State { res: tx });
+        rx.await.unwrap()
+    }
+    pub async fn get_topic(&self) -> String {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::GetTopic { res: tx });
+        rx.await.unwrap()
+    }
+    pub async fn get_tx(&self) -> UnboundedSender<Message> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::GetTx { res: tx });
+        rx.await.unwrap()
     }
 }
 
@@ -90,24 +130,39 @@ pub struct RealtimeChannel {
     join_payload: JoinPayload,
     presence: RealtimePresence,
     pub(crate) tx: Option<UnboundedSender<Message>>,
-    pub controller: (
-        UnboundedSender<ChannelControlMessage>,
-        UnboundedReceiver<ChannelControlMessage>,
+    pub manager_channel: (
+        UnboundedSender<ChannelManagerMessage>,
+        UnboundedReceiver<ChannelManagerMessage>,
     ),
+    pub(crate) message_handle: Option<JoinHandle<()>>,
 }
 
 impl RealtimeChannel {
-    pub(crate) async fn controller_recv(&mut self) {
-        while let Some(control_message) = self.controller.1.recv().await {
+    async fn manager_recv(&mut self) {
+        while let Some(control_message) = self.manager_channel.1.recv().await {
             match control_message {
-                ChannelControlMessage::Subscribe => self.subscribe().await,
-                ChannelControlMessage::SubscribeBlocking => {
-                    let _ = self.subscribe_blocking().await;
+                ChannelManagerMessage::Subscribe => {
+                    self.subscribe().await;
                 }
-                ChannelControlMessage::Broadcast(payload) => {
+                ChannelManagerMessage::SubscribeBlocking { res } => {
+                    let _ = res.send(self.subscribe_blocking().await);
+                }
+                ChannelManagerMessage::Broadcast { payload } => {
                     let _ = self.broadcast(payload).await;
                 }
-                ChannelControlMessage::ClientTx(tx) => self.client_tx = tx,
+                ChannelManagerMessage::ClientTx { new_tx, res } => {
+                    self.client_tx = new_tx;
+                    let _ = res.send(());
+                }
+                ChannelManagerMessage::State { res } => {
+                    let _ = res.send(self.state.lock().await.clone());
+                }
+                ChannelManagerMessage::GetTx { res } => {
+                    let _ = res.send(self.tx.clone().unwrap());
+                }
+                ChannelManagerMessage::GetTopic { res } => {
+                    let _ = res.send(self.topic.clone());
+                } // TODO kill message
             }
         }
     }
@@ -128,36 +183,33 @@ impl RealtimeChannel {
         let _ = self.send(join_message.into()).await;
     }
 
-    async fn subscribe_blocking(&mut self) -> Result<(), Error> {
+    async fn subscribe_blocking(&mut self) {
         self.subscribe().await;
 
         loop {
-            println!("waiting for subscription...");
             let state = self.state.lock().await;
             if *state == ChannelState::Joined {
                 break;
             }
         }
-
-        Ok(())
     }
 
-    async fn start_thread(&mut self) {
+    fn client_recv(&mut self) {
         let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
         self.tx = Some(channel_tx);
-        let thread_state = self.state.clone();
-        let thread_cdc_cbs = self.cdc_callbacks.clone();
-        let thread_bc_cbs = self.broadcast_callbacks.clone();
+        let task_state = self.state.clone();
+        let task_cdc_cbs = self.cdc_callbacks.clone();
+        let task_bc_cbs = self.broadcast_callbacks.clone();
         let id = self.id;
 
-        let _ws_thread = tokio::spawn(async move {
+        self.message_handle = Some(tokio::spawn(async move {
             while let Some(message) = channel_rx.recv().await {
                 let message: RealtimeMessage =
                     serde_json::from_str(message.to_text().unwrap()).unwrap();
 
                 // get locks
-                let mut broadcast_callbacks = thread_bc_cbs.lock().await;
-                let mut cdc_callbacks = thread_cdc_cbs.lock().await;
+                let mut broadcast_callbacks = task_bc_cbs.lock().await;
+                let mut cdc_callbacks = task_cdc_cbs.lock().await;
 
                 let test_message = message.clone(); // TODO fix dis
 
@@ -193,7 +245,7 @@ impl RealtimeChannel {
                             return;
                         }
                         if join_response.status == PayloadStatus::Ok {
-                            let mut channel_state = thread_state.lock().await;
+                            let mut channel_state = task_state.lock().await;
                             *channel_state = ChannelState::Joined;
                             drop(channel_state);
                         }
@@ -206,7 +258,7 @@ impl RealtimeChannel {
                 drop(broadcast_callbacks);
                 drop(cdc_callbacks);
             }
-        });
+        }));
     }
 
     /// Leave the channel
@@ -432,7 +484,6 @@ impl Debug for RealtimeChannel {
 /// Get access to this through [RealtimeClient::channel()]
 pub struct RealtimeChannelBuilder {
     topic: String,
-    access_token: String,
     broadcast: BroadcastConfig,
     presence: PresenceConfig,
     id: Uuid,
@@ -440,14 +491,12 @@ pub struct RealtimeChannelBuilder {
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
     broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
     presence_callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
-    client_tx: mpsc::UnboundedSender<Message>,
 }
 
 impl RealtimeChannelBuilder {
-    pub(crate) fn new(client: &mut RealtimeClient) -> Self {
+    pub fn new(topic: impl Into<String>) -> Self {
         Self {
-            topic: "no_topic".into(),
-            access_token: client.access_token.clone(),
+            topic: format!("realtime:{}", topic.into()),
             broadcast: Default::default(),
             presence: Default::default(),
             id: Uuid::new_v4(),
@@ -455,7 +504,6 @@ impl RealtimeChannelBuilder {
             cdc_callbacks: Default::default(),
             broadcast_callbacks: Default::default(),
             presence_callbacks: Default::default(),
-            client_tx: client.get_channel_tx(),
         }
     }
 
@@ -653,18 +701,21 @@ impl RealtimeChannelBuilder {
 
     /// Create the channel and pass ownership to provided [RealtimeClient], returning the channel
     /// id for later access through the client
-    pub async fn build(self, client: &mut RealtimeClient) -> ChannelController {
+    pub async fn build(self, client: ClientManager) -> Result<ChannelManager, RecvError> {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
         let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
         let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks));
-        let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelControlMessage>();
+        let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelManagerMessage>();
 
-        let mut c = RealtimeChannel {
+        let client_tx = client.clone().get_ws_tx().await?;
+        let access_token = client.clone().get_access_token().await?;
+
+        let mut channel = RealtimeChannel {
             tx: None,
             topic: self.topic,
             cdc_callbacks,
             broadcast_callbacks,
-            client_tx: self.client_tx,
+            client_tx,
             state,
             id: self.id,
             join_payload: JoinPayload {
@@ -673,14 +724,23 @@ impl RealtimeChannelBuilder {
                     presence: self.presence,
                     postgres_changes: self.postgres_changes,
                 },
-                access_token: self.access_token,
+                access_token,
             },
             presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
-            controller: (controller_tx, controller_rx),
+            manager_channel: (controller_tx, controller_rx),
+            message_handle: None,
         };
 
-        c.start_thread().await;
+        channel.client_recv(); // Spawns task, sets channel.tx
 
-        client.add_channel(c).await
+        let tx = channel.manager_channel.0.clone();
+
+        let _handle = tokio::spawn(async move { channel.manager_recv().await });
+
+        let channel_manager = ChannelManager { tx };
+
+        client.add_channel(channel_manager.clone()).await.unwrap();
+
+        Ok(channel_manager)
     }
 }

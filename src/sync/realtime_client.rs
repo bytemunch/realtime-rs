@@ -5,7 +5,7 @@ use std::{collections::HashMap, time::Duration};
 
 use tokio::sync::mpsc::error::{SendError, TryRecvError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -18,24 +18,10 @@ use uuid::Uuid;
 
 use futures_util::{pin_mut, StreamExt};
 
-use crate::message::payload::BroadcastPayload;
 use crate::message::RealtimeMessage;
-use crate::sync::realtime_channel::RealtimeChannel;
-use crate::DEBUG;
+use crate::sync::ChannelManagerMessage;
 
-use super::realtime_channel::RealtimeChannelBuilder;
-use super::{ChannelControlMessage, ChannelController, ChannelSendError, ChannelState};
-
-// TODO this is enough for it's own struct.
-type ChannelList = HashMap<
-    Uuid,
-    (
-        String,
-        UnboundedSender<Message>,
-        ChannelController,
-        JoinHandle<()>,
-    ),
->;
+use super::{ChannelManager, Responder};
 
 /// Error type for [RealtimeClient::sign_in_with_email_password()]
 #[derive(PartialEq, Debug)]
@@ -127,37 +113,91 @@ impl Default for MessageChannel {
     }
 }
 
-// TODO CONTROLLER HERE
-// interfaces with client same way channel works
-// Builder::build() returns controller
-// and pops the actual client on a thread
-// controller should hold thread handle
+pub enum ClientManagerMessage {
+    Connect {
+        res: Responder<()>,
+    },
+    GetWsTx {
+        res: Responder<UnboundedSender<Message>>,
+    },
+    GetAccessToken {
+        res: Responder<String>,
+    },
+    AddChannel {
+        manager: ChannelManager,
+        res: Responder<ChannelManager>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct ClientManager {
+    tx: UnboundedSender<ClientManagerMessage>,
+}
+
+impl ClientManager {
+    fn send(&self, message: ClientManagerMessage) -> Result<(), SendError<ClientManagerMessage>> {
+        self.tx.send(message)
+    }
+
+    pub async fn connect(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::Connect { res: tx });
+        rx.await.unwrap()
+    }
+
+    pub async fn get_ws_tx(&self) -> Result<UnboundedSender<Message>, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::GetWsTx { res: tx });
+        rx.await
+    }
+
+    pub async fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::GetAccessToken { res: tx });
+        rx.await
+    }
+
+    pub async fn add_channel(
+        &self,
+        channel_manager: ChannelManager,
+    ) -> Result<ChannelManager, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::AddChannel {
+            res: tx,
+            manager: channel_manager,
+        });
+        rx.await
+    }
+}
 
 /// Synchronous websocket client that interfaces with Supabase Realtime
-#[derive(Default)]
 pub struct RealtimeClient {
-    pub(crate) access_token: String,
+    pub(crate) access_token: String, // TODO wrap with Arc
     state: Arc<Mutex<ConnectionState>>,
     ws_tx: Option<mpsc::UnboundedSender<Message>>,
     ws_rx: Option<mpsc::UnboundedReceiver<Message>>,
-    channels: Arc<Mutex<ChannelList>>,
+    channels: Arc<Mutex<Vec<ChannelManager>>>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
-    middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
-    request: Request<()>,
+    middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
     // threads
     join_handles: Vec<JoinHandle<()>>,
     // builder options
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
-    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
+    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
+    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
     endpoint: String,
     max_events_per_second: usize,
+    manager_channel: (
+        UnboundedSender<ClientManagerMessage>,
+        UnboundedReceiver<ClientManagerMessage>,
+    ),
+    manager: ClientManager,
 }
 
 impl Debug for RealtimeClient {
@@ -168,6 +208,27 @@ impl Debug for RealtimeClient {
 }
 
 impl RealtimeClient {
+    async fn manager_recv(&mut self) {
+        while let Some(control_message) = self.manager_channel.1.recv().await {
+            match control_message {
+                ClientManagerMessage::Connect { res } => {
+                    let _ = self.connect().await;
+                    let _ = res.send(());
+                }
+                ClientManagerMessage::GetWsTx { res } => {
+                    let _ = res.send(self.ws_tx.clone().unwrap());
+                }
+                ClientManagerMessage::GetAccessToken { res } => {
+                    let _ = res.send(self.access_token.clone());
+                }
+                ClientManagerMessage::AddChannel { manager, res } => {
+                    let added = self.add_channel(manager).await;
+
+                    let _ = res.send(added);
+                }
+            }
+        }
+    }
     /// Returns a new [RealtimeClientBuilder] with provided `endpoint` and `access_token`
     pub fn builder(
         endpoint: impl Into<String>,
@@ -180,13 +241,6 @@ impl RealtimeClient {
     pub async fn get_status(&self) -> ConnectionState {
         let state = self.state.lock().await;
         *state
-    }
-
-    /// Returns a new [RealtimeChannelBuilder] instantiated with the provided `topic`
-    /// TODO CODE
-    /// ```
-    pub fn channel(&mut self, topic: impl Into<String>) -> RealtimeChannelBuilder {
-        RealtimeChannelBuilder::new(self).topic(topic)
     }
 
     /// Attempt to create a websocket connection with the server
@@ -260,6 +314,7 @@ impl RealtimeClient {
     }
 
     async fn connect_ws(&mut self) -> Result<(), ConnectError> {
+        println!("Connecting...");
         // Clear current threads
         for t in &mut self.join_handles {
             t.abort();
@@ -304,37 +359,48 @@ impl RealtimeClient {
 
             let channel_list = self.channels.clone();
             let recv_state = self.state.clone();
+            let manager = self.manager.clone();
 
             let recieve_thread = tokio::spawn(async move {
-                while let Some(msg) = read.next().await {
-                    if let Err(_err) = msg {
-                        println!("Disconnected!");
-                        let mut state = recv_state.lock().await;
-                        *state = ConnectionState::Reconnect;
-                        continue;
-                    }
-                    // TODO decode here
-                    let Ok(rt_msg) = serde_json::from_str::<RealtimeMessage>(
-                        msg.as_ref().unwrap().to_text().unwrap(), // TODO error handling here,
-                                                                  // disconnect detect
-                    ) else {
-                        continue;
-                    };
-
-                    let Ok(msg) = msg else {
-                        continue;
-                    };
-
-                    let list = channel_list.lock().await;
-
-                    for (_id, channel) in &*list {
-                        if *channel.0 != rt_msg.topic {
+                loop {
+                    while let Some(msg) = read.next().await {
+                        if let Err(_err) = msg {
+                            println!("Disconnected!");
+                            let mut state = recv_state.lock().await;
+                            *state = ConnectionState::Reconnect;
                             continue;
                         }
-                        let _ = channel.1.send(msg.clone());
+                        // TODO decode here
+                        let Ok(rt_msg) = serde_json::from_str::<RealtimeMessage>(
+                            msg.as_ref().unwrap().to_text().unwrap(), // TODO error handling here,
+                                                                      // disconnect detect
+                        ) else {
+                            continue;
+                        };
+
+                        let Ok(msg) = msg else {
+                            continue;
+                        };
+
+                        let list = channel_list.lock().await;
+
+                        for channel in &*list {
+                            if *channel.get_topic().await != rt_msg.topic {
+                                continue;
+                            }
+                            let _ = channel.get_tx().await.send(msg.clone());
+                        }
+
+                        let _ = ws_rx_tx.send(msg);
                     }
 
-                    let _ = ws_rx_tx.send(msg);
+                    let mut state = recv_state.lock().await;
+                    if *state == ConnectionState::Reconnect {
+                        println!("Reconnecting...");
+                        *state = ConnectionState::Reconnecting;
+                        drop(state);
+                        manager.connect().await;
+                    }
                 }
             });
 
@@ -362,10 +428,18 @@ impl RealtimeClient {
 
             let mut channels = self.channels.lock().await;
 
-            for (_id, (_topic, _tx, control_tx, _handle)) in channels.iter_mut() {
-                let _ =
-                    control_tx.send(ChannelControlMessage::ClientTx(self.ws_tx.clone().unwrap()));
-                let _ = control_tx.send(ChannelControlMessage::Subscribe);
+            // TODO filter out finished channels here
+
+            for manager in channels.iter_mut() {
+                let (cc_tx, cc_rx) = ChannelManager::oneshot();
+                let _ = manager.send(ChannelManagerMessage::ClientTx {
+                    new_tx: self.ws_tx.clone().unwrap(),
+                    res: cc_tx,
+                });
+
+                let _ = cc_rx.await;
+
+                let _ = manager.subscribe();
             }
 
             break;
@@ -374,18 +448,22 @@ impl RealtimeClient {
         Ok(())
     }
 
-    pub async fn handle_incoming(&mut self) {
+    async fn ws_recv(&mut self, manager: ClientManager) {
+        let state = self.state.clone();
+
         loop {
             while let Some(msg) = self.ws_rx.as_mut().unwrap().recv().await {
                 println!("[RECV] {:?}", msg);
             }
 
-            let mut state = self.state.lock().await;
+            println!("Recv fail");
+
+            let mut state = state.lock().await;
             if *state == ConnectionState::Reconnect {
                 println!("Reconnecting...");
                 *state = ConnectionState::Reconnecting;
                 drop(state);
-                let _ = self.connect_ws().await;
+                let _ = manager.connect();
             }
         }
     }
@@ -406,7 +484,7 @@ impl RealtimeClient {
     /// callbacks.
     pub fn add_middleware(
         &mut self,
-        middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>,
+        middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>,
     ) -> Uuid {
         // TODO user defined middleware ordering
         let uuid = Uuid::new_v4();
@@ -420,30 +498,14 @@ impl RealtimeClient {
         self
     }
 
-    pub(crate) async fn add_channel(&mut self, mut channel: RealtimeChannel) -> ChannelController {
+    async fn add_channel(&mut self, channel: ChannelManager) -> ChannelManager {
         let list = self.channels.clone();
 
         let mut list = list.lock().await;
 
-        // Ownership of channel passed to new thread here
-        // Controller TX retained by clone
-        // Controller TX can get and set channel tings
-        let topic = channel.topic.clone();
-        let channel_controller = ChannelController {
-            tx: channel.controller.0.clone(),
-        };
-        let channel_tx = channel.tx.clone().unwrap();
-        let id = channel.id;
+        list.push(channel.clone());
 
-        let handle = tokio::spawn(async move { channel.controller_recv().await });
-
-        list.insert(id, (topic, channel_tx, channel_controller.clone(), handle));
-
-        channel_controller
-    }
-
-    pub(crate) fn get_channel_tx(&self) -> mpsc::UnboundedSender<Message> {
-        self.ws_tx.clone().unwrap()
+        channel
     }
 
     fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {
@@ -457,10 +519,10 @@ impl RealtimeClient {
 /// Takes a `Box<dyn Fn(usize) -> Duration>`
 /// The provided function should take a count of reconnect attempts and return a [Duration] to wait
 /// until the next attempt is made.
-pub struct ReconnectFn(pub Box<dyn Fn(usize) -> Duration>);
+pub struct ReconnectFn(pub Box<dyn Fn(usize) -> Duration + Send>);
 
 impl ReconnectFn {
-    pub fn new(f: impl Fn(usize) -> Duration + 'static) -> Self {
+    pub fn new(f: impl Fn(usize) -> Duration + 'static + Send) -> Self {
         Self(Box::new(f))
     }
 }
@@ -495,8 +557,8 @@ pub struct RealtimeClientBuilder {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
-    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage>>,
+    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
+    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
@@ -636,19 +698,32 @@ impl RealtimeClientBuilder {
         self
     }
 
-    pub fn encode(mut self, encode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static) -> Self {
+    pub fn encode(
+        mut self,
+        encode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static + Send,
+    ) -> Self {
         self.encode = Some(Box::new(encode));
         self
     }
 
-    pub fn decode(mut self, decode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static) -> Self {
+    pub fn decode(
+        mut self,
+        decode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static + Send,
+    ) -> Self {
         self.decode = Some(Box::new(decode));
         self
     }
 
     /// Consume the [Self] and return a configured [RealtimeClient]
-    pub fn build(self) -> RealtimeClient {
-        RealtimeClient {
+    pub async fn build(self) -> ClientManager {
+        let (mgr_tx, mgr_rx) = mpsc::unbounded_channel::<ClientManagerMessage>();
+        let tx = mgr_tx.clone();
+
+        let manager = ClientManager { tx };
+
+        let manager2 = manager.clone();
+
+        let mut client = RealtimeClient {
             headers: self.headers,
             params: self.params,
             heartbeat_interval: self.heartbeat_interval,
@@ -661,8 +736,21 @@ impl RealtimeClientBuilder {
             access_token: self.access_token,
             max_events_per_second: self.max_events_per_second,
             next_ref: Uuid::new_v4(),
-            ..Default::default()
-        }
+            state: Arc::new(Mutex::new(ConnectionState::Closed)),
+            ws_tx: None,
+            ws_rx: None,
+            channels: Arc::new(Mutex::new(Vec::new())),
+            messages_this_second: Vec::new(),
+            middleware: HashMap::new(),
+            join_handles: Vec::new(),
+            manager_channel: (mgr_tx, mgr_rx),
+            manager,
+        };
+
+        // client.ws_recv(manager.clone()).await;
+        let handle = tokio::spawn(async move { client.manager_recv().await });
+
+        manager2
     }
 }
 
