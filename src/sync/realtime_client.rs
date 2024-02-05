@@ -315,7 +315,7 @@ impl RealtimeClient {
 
     async fn connect_ws(&mut self) -> Result<(), ConnectError> {
         println!("Connecting...");
-        // Clear current threads
+        // Clear current async tasks
         for t in &mut self.join_handles {
             t.abort();
         }
@@ -345,7 +345,7 @@ impl RealtimeClient {
 
             let (write, mut read) = ws_stream.split();
 
-            let send_thread = tokio::spawn(async move {
+            let send_task = tokio::spawn(async move {
                 let sender = UnboundedReceiverStream::new(ws_tx_rx)
                     .map(|x| {
                         // TODO encode here
@@ -361,7 +361,7 @@ impl RealtimeClient {
             let recv_state = self.state.clone();
             let manager = self.manager.clone();
 
-            let recieve_thread = tokio::spawn(async move {
+            let recieve_task = tokio::spawn(async move {
                 loop {
                     while let Some(msg) = read.next().await {
                         if let Err(_err) = msg {
@@ -391,6 +391,8 @@ impl RealtimeClient {
                             let _ = channel.get_tx().await.send(msg.clone());
                         }
 
+                        println!("[RECV] {:?}", msg);
+
                         let _ = ws_rx_tx.send(msg);
                     }
 
@@ -407,7 +409,7 @@ impl RealtimeClient {
             let hb_tx = ws_tx_tx.clone();
             let hb_ivl = self.heartbeat_interval.clone(); // TODO heartbeat interval can be moved here,
                                                           // no need to keep on RealtimeClient
-            let heartbeat_thread = tokio::spawn(async move {
+            let heartbeat_task = tokio::spawn(async move {
                 loop {
                     sleep(hb_ivl).await;
                     let _ = hb_tx.send(RealtimeMessage::heartbeat().into());
@@ -419,9 +421,9 @@ impl RealtimeClient {
                 *state = ConnectionState::Open;
             }
 
-            self.join_handles.push(send_thread);
-            self.join_handles.push(recieve_thread);
-            self.join_handles.push(heartbeat_thread);
+            self.join_handles.push(send_task);
+            self.join_handles.push(recieve_task);
+            self.join_handles.push(heartbeat_task);
 
             self.ws_tx = Some(ws_tx_tx);
             self.ws_rx = Some(ws_rx_rx);
@@ -431,7 +433,7 @@ impl RealtimeClient {
             // TODO filter out finished channels here
 
             for manager in channels.iter_mut() {
-                let (cc_tx, cc_rx) = ChannelManager::oneshot();
+                let (cc_tx, cc_rx) = oneshot::channel();
                 let _ = manager.send(ChannelManagerMessage::ClientTx {
                     new_tx: self.ws_tx.clone().unwrap(),
                     res: cc_tx,
@@ -446,26 +448,6 @@ impl RealtimeClient {
         }
 
         Ok(())
-    }
-
-    async fn ws_recv(&mut self, manager: ClientManager) {
-        let state = self.state.clone();
-
-        loop {
-            while let Some(msg) = self.ws_rx.as_mut().unwrap().recv().await {
-                println!("[RECV] {:?}", msg);
-            }
-
-            println!("Recv fail");
-
-            let mut state = state.lock().await;
-            if *state == ConnectionState::Reconnect {
-                println!("Reconnecting...");
-                *state = ConnectionState::Reconnecting;
-                drop(state);
-                let _ = manager.connect();
-            }
-        }
     }
 
     pub async fn send(&mut self, msg: RealtimeMessage) -> Result<(), SendError<Message>> {

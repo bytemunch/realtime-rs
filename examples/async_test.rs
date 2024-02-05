@@ -28,7 +28,7 @@ async fn main() {
         .await
         .unwrap();
 
-    let _ = channel.subscribe();
+    channel.subscribe_blocking().await.unwrap();
 
     let mut payload = realtime_rs::message::payload::BroadcastPayload {
         event: "test_event".into(),

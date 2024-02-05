@@ -78,13 +78,7 @@ pub struct ChannelManager {
     pub(crate) tx: UnboundedSender<ChannelManagerMessage>,
 }
 
-// TODO rethink where channel state is kept. Maybe keep it on the client?
-
 impl ChannelManager {
-    pub fn oneshot<T>() -> (oneshot::Sender<T>, oneshot::Receiver<T>) {
-        // TODO does this really save enough keystrokes? maybe abstracted early here
-        oneshot::channel::<T>()
-    }
     pub fn send(
         &self,
         message: ChannelManagerMessage,
@@ -95,7 +89,7 @@ impl ChannelManager {
         let _ = self.send(ChannelManagerMessage::Subscribe);
     }
     pub async fn subscribe_blocking(&self) -> Result<(), oneshot::error::RecvError> {
-        let (tx, rx) = Self::oneshot();
+        let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::SubscribeBlocking { res: tx });
         rx.await
     }
@@ -103,7 +97,7 @@ impl ChannelManager {
         let _ = self.send(ChannelManagerMessage::Broadcast { payload });
     }
     pub async fn state(&self) -> ChannelState {
-        let (tx, rx) = Self::oneshot::<ChannelState>();
+        let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::State { res: tx });
         rx.await.unwrap()
     }
@@ -145,23 +139,23 @@ impl RealtimeChannel {
                     self.subscribe().await;
                 }
                 ChannelManagerMessage::SubscribeBlocking { res } => {
-                    let _ = res.send(self.subscribe_blocking().await);
+                    self.subscribe_blocking(res).await;
                 }
                 ChannelManagerMessage::Broadcast { payload } => {
-                    let _ = self.broadcast(payload).await;
+                    self.broadcast(payload).await.unwrap();
                 }
                 ChannelManagerMessage::ClientTx { new_tx, res } => {
                     self.client_tx = new_tx;
-                    let _ = res.send(());
+                    res.send(()).unwrap();
                 }
                 ChannelManagerMessage::State { res } => {
-                    let _ = res.send(self.state.lock().await.clone());
+                    res.send(self.state.lock().await.clone()).unwrap();
                 }
                 ChannelManagerMessage::GetTx { res } => {
-                    let _ = res.send(self.tx.clone().unwrap());
+                    res.send(self.tx.clone().unwrap()).unwrap();
                 }
                 ChannelManagerMessage::GetTopic { res } => {
-                    let _ = res.send(self.topic.clone());
+                    res.send(self.topic.clone()).unwrap();
                 } // TODO kill message
             }
         }
@@ -183,15 +177,20 @@ impl RealtimeChannel {
         let _ = self.send(join_message.into()).await;
     }
 
-    async fn subscribe_blocking(&mut self) {
+    async fn subscribe_blocking(&mut self, tx: Responder<()>) {
         self.subscribe().await;
 
-        loop {
-            let state = self.state.lock().await;
-            if *state == ChannelState::Joined {
-                break;
+        let state = self.state.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let state = state.lock().await;
+                if *state == ChannelState::Joined {
+                    break;
+                }
             }
-        }
+            tx.send(()).unwrap();
+        });
     }
 
     fn client_recv(&mut self) {
