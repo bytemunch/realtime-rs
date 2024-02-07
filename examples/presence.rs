@@ -2,25 +2,22 @@ use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::presence::PresenceEvent,
-    sync::{ChannelState, ClientState, NextMessageError, RealtimeClient},
+    realtime_channel::RealtimeChannelBuilder,
+    realtime_client::{ClientState, RealtimeClientBuilder},
 };
 
 fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut client = RealtimeClient::builder(url, anon_key).build();
+    let client = RealtimeClientBuilder::new(url, anon_key).build().to_sync();
 
-    let client = match client.connect() {
-        Ok(client) => client,
-        Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
-    };
+    client.connect();
 
     let mut presence_payload = HashMap::new();
     presence_payload.insert("kb_layout".into(), "en_US".into());
 
-    let channel_id = client
-        .channel("channel_1".to_string())
+    let channel = RealtimeChannelBuilder::new("channel_1")
         // TODO presence_state message event
         .on_presence(PresenceEvent::Sync, |key, _old_state, _new_state| {
             println!("Presence sync: {:?}", key);
@@ -28,39 +25,19 @@ fn main() {
         .on_presence(PresenceEvent::Join, |key, _old_state, _new_state| {
             println!("Presence join: {:?}", key);
         })
-        .on_presence(PresenceEvent::Leave, |key, _old_state, _new_statee| {
+        .on_presence(PresenceEvent::Leave, |key, _old_state, _new_state| {
             println!("Presence leave: {:?}", key);
         })
-        .build(client);
+        .build_sync(&client)
+        .unwrap();
 
-    client.get_channel_mut(channel_id).unwrap().subscribe();
+    channel.subscribe_blocking().unwrap();
 
-    let mut sent_once = false;
+    channel.track(presence_payload.clone()).unwrap();
 
     loop {
-        if client.get_status() == ClientState::Closed {
+        if client.get_state().unwrap() == ClientState::Closed {
             break;
-        }
-
-        match client.next_message() {
-            Ok(topic) => {
-                println!("Message forwarded to {:?}", topic)
-            }
-            Err(NextMessageError::WouldBlock) => {}
-            Err(_e) => {
-                //println!("NextMessageError: {:?}", e)
-            }
-        }
-
-        if sent_once {
-            continue;
-        }
-
-        let channel = client.get_channel_mut(channel_id).unwrap();
-
-        if channel.get_status() == ChannelState::Joined {
-            channel.track(presence_payload.clone());
-            sent_once = true;
         }
     }
 

@@ -16,7 +16,6 @@ pub enum PresenceEvent {
 
 pub type RawPresenceState = HashMap<String, RawPresenceMetas>;
 
-pub(crate) type PresenceCallback = Box<dyn FnMut(String, PresenceState, PresenceState) + Send>;
 //{
 //  abc123: {1: {foo: bar}, 2: {foo: baz} },
 //  def456: {3: {foo: baz}, 4: {foo: bar} },

@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 
-use crate::message::presence::{PresenceCallback, PresenceDiff, PresenceEvent, PresenceState};
+use crate::{
+    message::presence::{PresenceDiff, PresenceEvent, PresenceState},
+    realtime_channel::PresenceCallback,
+};
+
+pub(crate) type PresenceCallbackMap = HashMap<PresenceEvent, Vec<PresenceCallback>>;
 
 #[derive(Default)]
 pub(crate) struct RealtimePresence {
     pub state: PresenceState,
-    callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
+    callbacks: PresenceCallbackMap,
 }
 
 impl RealtimePresence {

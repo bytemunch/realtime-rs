@@ -1,5 +1,6 @@
 use crate::realtime_client::ClientManager;
 use crate::realtime_client::ClientManagerSync;
+use crate::realtime_presence::PresenceCallbackMap;
 use crate::realtime_presence::RealtimePresence;
 use crate::Responder;
 
@@ -13,7 +14,6 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::message::{
@@ -22,7 +22,7 @@ use crate::message::{
         PayloadStatus, PostgresChange, PostgresChangesEvent, PostgresChangesPayload,
         PresenceConfig,
     },
-    presence::{PresenceCallback, PresenceEvent, PresenceState},
+    presence::{PresenceEvent, PresenceState},
     MessageEvent, PostgresChangeFilter, RealtimeMessage,
 };
 
@@ -34,6 +34,7 @@ type CdcCallback = (
     Box<dyn FnMut(&PostgresChangesPayload) + Send>,
 );
 type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>) + Send>;
+pub(crate) type PresenceCallback = Box<dyn Fn(String, PresenceState, PresenceState) + Send>;
 
 /// Channel states
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -65,7 +66,7 @@ pub enum ChannelManagerMessage {
         new_tx: UnboundedSender<RealtimeMessage>,
         res: Responder<()>,
     },
-    State {
+    GetState {
         res: Responder<ChannelState>,
     },
     GetTx {
@@ -73,6 +74,16 @@ pub enum ChannelManagerMessage {
     },
     GetTopic {
         res: Responder<String>,
+    },
+    GetPresenceState {
+        res: Responder<PresenceState>,
+    },
+    PresenceTrack {
+        payload: HashMap<String, Value>,
+        res: Responder<()>,
+    },
+    PresenceUntrack {
+        res: Responder<()>,
     },
 }
 
@@ -100,10 +111,20 @@ impl ChannelManager {
     pub fn broadcast(&self, payload: BroadcastPayload) {
         let _ = self.send(ChannelManagerMessage::Broadcast { payload });
     }
-    pub async fn state(&self) -> ChannelState {
+    pub async fn track(&self, payload: HashMap<String, Value>) -> Result<(), RecvError> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.send(ChannelManagerMessage::State { res: tx });
-        rx.await.unwrap()
+        let _ = self.send(ChannelManagerMessage::PresenceTrack { payload, res: tx });
+        rx.await
+    }
+    pub async fn untrack(&self) -> Result<(), RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::PresenceUntrack { res: tx });
+        rx.await
+    }
+    pub async fn get_state(&self) -> Result<ChannelState, RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::GetState { res: tx });
+        rx.await
     }
     pub async fn get_topic(&self) -> String {
         let (tx, rx) = oneshot::channel();
@@ -113,6 +134,11 @@ impl ChannelManager {
     pub async fn get_tx(&self) -> UnboundedSender<RealtimeMessage> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::GetTx { res: tx });
+        rx.await.unwrap()
+    }
+    pub async fn get_presence_state(&self) -> PresenceState {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::GetPresenceState { res: tx });
         rx.await.unwrap()
     }
     pub fn to_sync(self) -> ChannelManagerSync {
@@ -141,6 +167,18 @@ impl ChannelManagerSync {
     pub fn broadcast(&self, payload: BroadcastPayload) {
         self.inner.broadcast(payload)
     }
+    pub fn get_state(&self) -> Result<ChannelState, RecvError> {
+        self.inner.rt.block_on(self.inner.get_state())
+    }
+    pub fn get_presence_state(&self) -> PresenceState {
+        self.inner.rt.block_on(self.inner.get_presence_state())
+    }
+    pub fn track(&self, payload: HashMap<String, Value>) -> Result<(), RecvError> {
+        self.inner.rt.block_on(self.inner.track(payload))
+    }
+    pub fn untrack(&self) -> Result<(), RecvError> {
+        self.inner.rt.block_on(self.inner.untrack())
+    }
 }
 
 /// Channel structure
@@ -152,7 +190,7 @@ struct RealtimeChannel {
     pub(crate) broadcast_callbacks: Arc<Mutex<HashMap<String, Vec<BroadcastCallback>>>>,
     pub(crate) client_tx: mpsc::UnboundedSender<RealtimeMessage>,
     join_payload: JoinPayload,
-    presence: RealtimePresence,
+    presence: Arc<Mutex<RealtimePresence>>,
     pub(crate) tx: Option<UnboundedSender<RealtimeMessage>>,
     pub(crate) manager_channel: (
         UnboundedSender<ChannelManagerMessage>,
@@ -179,7 +217,7 @@ impl RealtimeChannel {
                     self.client_tx = new_tx;
                     res.send(()).unwrap();
                 }
-                ChannelManagerMessage::State { res } => {
+                ChannelManagerMessage::GetState { res } => {
                     res.send(self.state.lock().await.clone()).unwrap();
                 }
                 ChannelManagerMessage::GetTx { res } => {
@@ -187,6 +225,16 @@ impl RealtimeChannel {
                 }
                 ChannelManagerMessage::GetTopic { res } => {
                     res.send(self.topic.clone()).unwrap();
+                }
+                ChannelManagerMessage::PresenceTrack { payload, res } => {
+                    res.send(self.track(payload).await.unwrap()).unwrap()
+                }
+                ChannelManagerMessage::PresenceUntrack { res } => {
+                    res.send(self.untrack().await.unwrap()).unwrap()
+                }
+                ChannelManagerMessage::GetPresenceState { res } => {
+                    let presence = self.presence.lock().await;
+                    res.send(presence.state.clone()).unwrap();
                 } // TODO kill message
             }
         }
@@ -231,6 +279,7 @@ impl RealtimeChannel {
         let task_cdc_cbs = self.cdc_callbacks.clone();
         let task_bc_cbs = self.broadcast_callbacks.clone();
         let id = self.id;
+        let presence = self.presence.clone();
 
         self.message_handle = Some(self.rt.spawn(async move {
             while let Some(message) = channel_rx.recv().await {
@@ -277,6 +326,14 @@ impl RealtimeChannel {
                             drop(channel_state);
                         }
                     }
+                    Payload::PresenceDiff(diff) => {
+                        let mut presence = presence.lock().await;
+                        presence.sync_diff(diff.into());
+                    }
+                    Payload::PresenceState(state) => {
+                        let mut presence = presence.lock().await;
+                        presence.sync(state.into());
+                    }
                     _ => {
                         println!("Unmatched payload ;_;")
                     }
@@ -315,31 +372,26 @@ impl RealtimeChannel {
         }
     }
 
-    /// Returns the current [PresenceState] of the channel
-    fn presence_state(&self) -> PresenceState {
-        self.presence.state.clone()
-    }
-
     /// Track provided state in Realtime Presence
-    fn track(&mut self, payload: HashMap<String, Value>) -> &mut RealtimeChannel {
-        let _ = self.send(RealtimeMessage {
+    async fn track(&mut self, payload: HashMap<String, Value>) -> Result<(), ChannelSendError> {
+        self.send(RealtimeMessage {
             event: MessageEvent::Presence,
             topic: self.topic.clone(),
             payload: Payload::PresenceTrack(payload.into()),
             message_ref: None,
-        });
-
-        self
+        })
+        .await
     }
 
     /// Sends a message to stop tracking this channel's presence
-    fn untrack(&mut self) {
-        let _ = self.send(RealtimeMessage {
+    async fn untrack(&mut self) -> Result<(), ChannelSendError> {
+        self.send(RealtimeMessage {
             event: MessageEvent::Untrack,
             topic: self.topic.clone(),
             payload: Payload::Empty {},
             message_ref: None,
-        });
+        })
+        .await
     }
 
     async fn send(&mut self, message: RealtimeMessage) -> Result<(), ChannelSendError> {
@@ -413,7 +465,7 @@ pub struct RealtimeChannelBuilder {
     postgres_changes: Vec<PostgresChange>,
     cdc_callbacks: HashMap<PostgresChangesEvent, Vec<CdcCallback>>,
     broadcast_callbacks: HashMap<String, Vec<BroadcastCallback>>,
-    presence_callbacks: HashMap<PresenceEvent, Vec<PresenceCallback>>,
+    presence_callbacks: PresenceCallbackMap,
 }
 
 impl RealtimeChannelBuilder {
@@ -483,7 +535,7 @@ impl RealtimeChannelBuilder {
         mut self,
         event: PresenceEvent,
         // TODO callback type alias
-        callback: impl FnMut(String, PresenceState, PresenceState) + 'static + Send,
+        callback: impl Fn(String, PresenceState, PresenceState) + Send + 'static,
     ) -> Self {
         if self.presence_callbacks.get_mut(&event).is_none() {
             self.presence_callbacks.insert(event.clone(), vec![]);
@@ -549,7 +601,9 @@ impl RealtimeChannelBuilder {
                 },
                 access_token,
             },
-            presence: RealtimePresence::from_channel_builder(self.presence_callbacks),
+            presence: Arc::new(Mutex::new(RealtimePresence::from_channel_builder(
+                self.presence_callbacks,
+            ))),
             manager_channel: (controller_tx, controller_rx),
             message_handle: None,
         };

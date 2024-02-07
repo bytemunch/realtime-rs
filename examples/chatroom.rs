@@ -1,12 +1,12 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     env,
     io::{self, stdout, Write},
-    rc::Rc,
-    sync::mpsc::{self, Receiver},
-    thread::{self, sleep},
-    time::Duration,
+    sync::{
+        mpsc::{self, Receiver},
+        Arc, Mutex,
+    },
+    thread::{self},
 };
 
 use realtime_rs::{
@@ -14,7 +14,8 @@ use realtime_rs::{
         payload::{BroadcastConfig, BroadcastPayload},
         presence::PresenceEvent,
     },
-    sync::{NextMessageError, RealtimeClient},
+    realtime_channel::RealtimeChannelBuilder,
+    realtime_client::RealtimeClientBuilder,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -32,14 +33,15 @@ struct ChatMessage {
 async fn main() {
     let mut email = String::new();
     let mut password = String::new();
-    let alias = Rc::new(RefCell::new(String::new()));
+    let alias = Arc::new(Mutex::new(String::new()));
 
     println!("Welcome to SupaChat!\n");
 
     if DEBUG {
         email = String::from("test@example.com");
         password = String::from("password");
-        alias.replace(String::from("test"));
+        let mut a_guard = alias.lock().unwrap();
+        *a_guard = "test".into();
     } else {
         println!("Enter email: (blank for anon)");
         io::stdin()
@@ -63,21 +65,19 @@ async fn main() {
             .read_line(&mut buf)
             .expect("couldn't parse alias");
 
-        alias.replace(buf.trim().into());
+        let mut a_guard = alias.lock().unwrap();
+        *a_guard = buf.trim().into();
     }
 
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut gotrue = go_true::Client::new("http://192.168.64.7:9999".to_string());
-    let mut client = RealtimeClient::builder(url, anon_key).build();
+    let mut client = RealtimeClientBuilder::new(url, anon_key).build();
+    let mut gotrue = go_true::Client::new("http://192.168.64.5:9999".to_string());
 
     println!("Connecting...");
 
-    match client.connect() {
-        Ok(_) => {}
-        Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
-    };
+    client.connect().await;
 
     println!("Logging in...");
 
@@ -87,23 +87,24 @@ async fn main() {
             .await
         {
             Ok(session) => {
-                client.set_auth(session.access_token);
+                client.set_access_token(session.access_token).await.unwrap();
             }
             Err(e) => return println!("Login error: {:?}", e),
         }
     }
 
-    println!("You are now chatting as [{}]\n\nCommands:\n\t/online\t\t:Show online users\n\t/alias NAME\t:Change your alias\n", alias.borrow());
+    let a_guard = alias.lock().unwrap();
+
+    println!("You are now chatting as [{}]\n\nCommands:\n\t/online\t\t:Show online users\n\t/alias NAME\t:Change your alias\n", a_guard);
 
     let on_broadcast_alias = alias.clone();
     let on_join_alias = alias.clone();
     let on_leave_alias = alias.clone();
 
-    print!("\n{}", prompt(alias.borrow().as_str()));
+    print!("\n{}", prompt(a_guard.as_str()));
     stdout().flush().unwrap();
 
-    let channel_id = client
-        .channel("chatroom")
+    let channel = RealtimeChannelBuilder::new("chatroom")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
             ack: false,
@@ -128,15 +129,12 @@ async fn main() {
             };
 
             print!("\r[{}]: {}", recieved.author, recieved.message);
-            if recieved.author == *on_broadcast_alias.borrow() {
+            let a_guard = on_broadcast_alias.lock().unwrap();
+            if recieved.author == *a_guard {
                 // TODO not repeat, count buffer
-                print!(
-                    "\r{}\r{}",
-                    " ".repeat(50),
-                    prompt(on_broadcast_alias.borrow().as_str())
-                );
+                print!("\r{}\r{}", " ".repeat(50), prompt(a_guard.as_str()));
             } else {
-                print!("\n{}", prompt(on_broadcast_alias.borrow().as_str()));
+                print!("\n{}", prompt(a_guard.as_str()));
             }
             stdout().flush().unwrap();
         })
@@ -146,49 +144,38 @@ async fn main() {
                     "\r{} joined the chatroom.",
                     serde_json::from_value::<String>(data.get("alias").unwrap().clone()).unwrap()
                 );
-                print!("\n{}", prompt(on_join_alias.borrow().as_str()));
+                let a_guard = on_join_alias.lock().unwrap();
+                print!("\n{}", prompt(a_guard.as_str()));
                 stdout().flush().unwrap();
             }
         })
         .on_presence(PresenceEvent::Leave, move |_id, _state, leaves| {
-            let prompt = |alias| format!("[{}]: ", alias);
             for (_id, data) in leaves.get_phx_map() {
                 print!(
                     "\r{} has gone to touch grass.",
                     serde_json::from_value::<String>(data.get("alias").unwrap().clone()).unwrap()
                 );
-                print!("\n{}", prompt(on_leave_alias.borrow()));
+                let a_guard = on_leave_alias.lock().unwrap();
+                print!("\n{}", prompt(a_guard.as_str()));
                 stdout().flush().unwrap();
             }
         })
-        .build(&mut client);
+        .build(&mut client)
+        .await
+        .unwrap();
 
-    let _ = client.block_until_subscribed(channel_id);
+    channel.subscribe_blocking().await.unwrap();
 
     let mut state_data = HashMap::new();
-    state_data.insert(
-        "alias".into(),
-        serde_json::Value::String(alias.borrow().clone()),
-    );
-    client
-        .get_channel_mut(channel_id)
-        .unwrap()
-        .track(state_data);
+    state_data.insert("alias".into(), serde_json::Value::String(a_guard.clone()));
+
+    channel.track(state_data).await.unwrap();
 
     let stdin_rx = spawn_stdin_channel();
 
+    drop(a_guard);
+
     loop {
-        sleep(Duration::from_millis(33));
-
-        match client.next_message() {
-            Ok(_uuid) => {}
-            Err(NextMessageError::ClientClosed) => {
-                println!("Client closed");
-            }
-            Err(NextMessageError::WouldBlock) => {}
-            Err(err) => println!("Client error: {}", err),
-        }
-
         match stdin_rx.try_recv() {
             Ok(input) => {
                 let regex = Regex::new(r"(\/)([\S]*)$").unwrap();
@@ -200,12 +187,7 @@ async fn main() {
                         "online" => {
                             print!("\rOnline Users: \n");
 
-                            for (_id, data) in client
-                                .get_channel(channel_id)
-                                .unwrap()
-                                .presence_state()
-                                .get_phx_map()
-                            {
+                            for (_id, data) in channel.get_presence_state().await.get_phx_map() {
                                 println!(
                                     "{}",
                                     serde_json::from_value::<String>(
@@ -215,7 +197,8 @@ async fn main() {
                                 );
                             }
 
-                            print!("\r{}\r{}", " ".repeat(50), prompt(alias.borrow().as_str()));
+                            let a_guard = alias.lock().unwrap();
+                            print!("\r{}\r{}", " ".repeat(50), prompt(a_guard.as_str()));
                             stdout().flush().unwrap();
                         }
                         _ => {
@@ -233,19 +216,17 @@ async fn main() {
 
                     match command {
                         "alias" => {
-                            alias.replace(arg.to_string());
+                            let mut a_guard = alias.lock().unwrap();
+                            *a_guard = arg.to_string();
 
                             let mut state_data = HashMap::new();
                             state_data.insert(
                                 "alias".into(),
-                                serde_json::to_value(alias.borrow().clone()).unwrap(),
+                                serde_json::to_value(a_guard.clone()).unwrap(),
                             );
-                            client
-                                .get_channel_mut(channel_id)
-                                .unwrap()
-                                .track(state_data);
+                            channel.track(state_data).await.unwrap();
 
-                            println!("\rYou are now chatting as [{}]", alias.borrow());
+                            println!("\rYou are now chatting as [{}]", a_guard);
                         }
                         _ => {
                             println!("Couldn't find command {}", command);
@@ -257,14 +238,15 @@ async fn main() {
 
                 let mut payload = HashMap::new();
                 payload.insert("message".into(), input.trim().into());
-                payload.insert("author".into(), alias.borrow().trim().into());
+
+                {
+                    let a_guard = alias.lock().unwrap();
+                    payload.insert("author".into(), a_guard.trim().into());
+                }
 
                 let payload = BroadcastPayload::new("supachat", payload);
 
-                let _ = client
-                    .get_channel_mut(channel_id)
-                    .unwrap()
-                    .broadcast(payload);
+                let _ = channel.broadcast(payload);
             }
             Err(_e) => {}
         }

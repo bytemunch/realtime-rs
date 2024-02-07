@@ -13,7 +13,6 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Request, Uri};
-use tokio_tungstenite::tungstenite::Message;
 
 use uuid::Uuid;
 
@@ -64,6 +63,10 @@ pub enum ClientManagerMessage {
     GetState {
         res: Responder<ClientState>,
     },
+    SetAccessToken {
+        res: Responder<String>,
+        access_token: String,
+    },
     AddChannel {
         manager: ChannelManager,
         res: Responder<ChannelManager>,
@@ -105,6 +108,17 @@ impl ClientManager {
         let _ = self.send(ClientManagerMessage::GetAccessToken { res: tx });
         rx.await
     }
+    pub async fn set_access_token(
+        &self,
+        access_token: String,
+    ) -> Result<String, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::SetAccessToken {
+            res: tx,
+            access_token,
+        });
+        rx.await
+    }
     pub async fn add_channel(
         &self,
         channel_manager: ChannelManager,
@@ -142,6 +156,14 @@ impl ClientManagerSync {
     pub fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_access_token())
     }
+    pub fn set_access_token(
+        &self,
+        access_token: String,
+    ) -> Result<String, oneshot::error::RecvError> {
+        self.inner
+            .rt
+            .block_on(self.inner.set_access_token(access_token))
+    }
     pub fn add_channel(
         &self,
         channel_manager: ChannelManager,
@@ -157,13 +179,13 @@ impl ClientManagerSync {
 
 /// Synchronous websocket client that interfaces with Supabase Realtime
 struct RealtimeClient {
-    pub(crate) access_token: String, // TODO wrap with Arc
+    pub(crate) access_token: Arc<Mutex<String>>, // TODO wrap with Arc
     state: Arc<Mutex<ClientState>>,
     ws_tx: Option<mpsc::UnboundedSender<RealtimeMessage>>,
     channels: Arc<Mutex<Vec<ChannelManager>>>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
-    middleware: HashMap<Uuid, Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
+    middleware: HashMap<Uuid, Box<fn(RealtimeMessage) -> RealtimeMessage>>,
     // threads
     join_handles: Vec<JoinHandle<()>>,
     // builder options
@@ -204,7 +226,13 @@ impl RealtimeClient {
                     let _ = res.send(self.ws_tx.clone().unwrap());
                 }
                 ClientManagerMessage::GetAccessToken { res } => {
-                    let _ = res.send(self.access_token.clone());
+                    let token = self.access_token.lock().await;
+                    let _ = res.send(token.clone());
+                }
+                ClientManagerMessage::SetAccessToken { access_token, res } => {
+                    let mut token = self.access_token.lock().await;
+                    *token = access_token;
+                    let _ = res.send(token.clone());
                 }
                 ClientManagerMessage::AddChannel { manager, res } => {
                     let added = self.add_channel(manager).await;
@@ -226,10 +254,11 @@ impl RealtimeClient {
         Ok(self)
     }
 
-    fn build_request(&self) -> Result<Request<()>, ConnectError> {
+    async fn build_request(&self) -> Result<Request<()>, ConnectError> {
+        let token = self.access_token.lock().await;
         let uri: Uri = match format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-            self.endpoint, self.access_token
+            self.endpoint, *token
         )
         .parse()
         {
@@ -274,7 +303,7 @@ impl RealtimeClient {
 
         let headers = request.headers_mut();
 
-        let auth: HeaderValue = format!("Bearer {}", self.access_token)
+        let auth: HeaderValue = format!("Bearer {}", *token)
             .parse()
             .expect("malformed access token?");
         headers.insert("Authorization", auth);
@@ -296,7 +325,7 @@ impl RealtimeClient {
 
         self.join_handles.clear();
 
-        let request = self.build_request()?;
+        let request = self.build_request().await?;
 
         let mut reconnect_attempts = 0;
         loop {
@@ -434,20 +463,10 @@ impl RealtimeClient {
         channel
     }
 
-    /// Use provided JWT to authorize future requests from this client and all channels
-    fn set_auth(&mut self, access_token: String) {
-        self.access_token = access_token.clone();
-
-        // TODO channel should reference client auth directly
-    }
-
     // TODO look into if middleware is needed?
     /// Add a callback to run mutably on recieved [RealtimeMessage]s before any other registered
     /// callbacks.
-    fn add_middleware(
-        &mut self,
-        middleware: Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>,
-    ) -> Uuid {
+    fn add_middleware(&mut self, middleware: Box<fn(RealtimeMessage) -> RealtimeMessage>) -> Uuid {
         // TODO user defined middleware ordering
         let uuid = Uuid::new_v4();
         self.middleware.insert(uuid, middleware);
@@ -471,10 +490,10 @@ impl RealtimeClient {
 /// Takes a `Box<dyn Fn(usize) -> Duration>`
 /// The provided function should take a count of reconnect attempts and return a [Duration] to wait
 /// until the next attempt is made.
-pub struct ReconnectFn(pub Box<dyn Fn(usize) -> Duration + Send>);
+pub struct ReconnectFn(pub Box<fn(usize) -> Duration>);
 
 impl ReconnectFn {
-    pub fn new(f: impl Fn(usize) -> Duration + 'static + Send) -> Self {
+    pub fn new(f: fn(usize) -> Duration) -> Self {
         Self(Box::new(f))
     }
 }
@@ -686,7 +705,7 @@ impl RealtimeClientBuilder {
             reconnect_max_attempts: self.reconnect_max_attempts,
             connection_timeout: self.connection_timeout,
             endpoint: self.endpoint,
-            access_token: self.access_token,
+            access_token: Arc::new(Mutex::new(self.access_token)),
             max_events_per_second: self.max_events_per_second,
             next_ref: Uuid::new_v4(),
             state: Arc::new(Mutex::new(ClientState::Closed)),
