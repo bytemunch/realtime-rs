@@ -56,7 +56,7 @@ pub enum ClientManagerMessage {
         res: Responder<()>,
     },
     GetWsTx {
-        res: Responder<UnboundedSender<Message>>,
+        res: Responder<UnboundedSender<RealtimeMessage>>,
     },
     GetAccessToken {
         res: Responder<String>,
@@ -95,7 +95,7 @@ impl ClientManager {
     }
     pub(crate) async fn get_ws_tx(
         &self,
-    ) -> Result<UnboundedSender<Message>, oneshot::error::RecvError> {
+    ) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::GetWsTx { res: tx });
         rx.await
@@ -133,7 +133,7 @@ impl ClientManagerSync {
     pub fn connect(&self) {
         self.inner.rt.block_on(self.inner.connect());
     }
-    pub fn get_ws_tx(&self) -> Result<UnboundedSender<Message>, oneshot::error::RecvError> {
+    pub fn get_ws_tx(&self) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_ws_tx())
     }
     pub fn get_state(&self) -> Result<ClientState, oneshot::error::RecvError> {
@@ -159,8 +159,7 @@ impl ClientManagerSync {
 struct RealtimeClient {
     pub(crate) access_token: String, // TODO wrap with Arc
     state: Arc<Mutex<ClientState>>,
-    ws_tx: Option<mpsc::UnboundedSender<Message>>,
-    ws_rx: Option<mpsc::UnboundedReceiver<Message>>,
+    ws_tx: Option<mpsc::UnboundedSender<RealtimeMessage>>,
     channels: Arc<Mutex<Vec<ChannelManager>>>,
     messages_this_second: Vec<SystemTime>,
     next_ref: Uuid,
@@ -171,8 +170,8 @@ struct RealtimeClient {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
-    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
+    encode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
+    decode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
@@ -301,10 +300,7 @@ impl RealtimeClient {
 
         let mut reconnect_attempts = 0;
         loop {
-            // change all channel client_tx to new ones?
-
             let (ws_tx_tx, ws_tx_rx) = mpsc::unbounded_channel();
-            let (ws_rx_tx, ws_rx_rx) = mpsc::unbounded_channel();
 
             let Ok((ws_stream, _res)) = connect_async(request.clone()).await else {
                 reconnect_attempts += 1;
@@ -320,12 +316,17 @@ impl RealtimeClient {
 
             let (write, mut read) = ws_stream.split();
 
+            let encode = self.encode.clone();
+
             let send_task = self.rt.spawn(async move {
                 let sender = UnboundedReceiverStream::new(ws_tx_rx)
-                    .map(|x| {
+                    .map(|mut x: RealtimeMessage| {
                         // TODO encode here
+                        if let Some(encode) = encode.clone() {
+                            x = encode(x);
+                        }
                         println!("[SEND] {:?}", x);
-                        Ok(x)
+                        Ok(x.into())
                     })
                     .forward(write);
                 pin_mut!(sender);
@@ -335,6 +336,7 @@ impl RealtimeClient {
             let channel_list = self.channels.clone();
             let recv_state = self.state.clone();
             let manager = self.manager.clone();
+            let decode = self.decode.clone();
 
             let recieve_task = self.rt.spawn(async move {
                 loop {
@@ -345,30 +347,28 @@ impl RealtimeClient {
                             *state = ClientState::Reconnect;
                             continue;
                         }
-                        // TODO decode here
-                        let Ok(rt_msg) = serde_json::from_str::<RealtimeMessage>(
+
+                        let Ok(mut msg) = serde_json::from_str::<RealtimeMessage>(
                             msg.as_ref().unwrap().to_text().unwrap(), // TODO error handling here,
                                                                       // disconnect detect
                         ) else {
                             continue;
                         };
 
-                        let Ok(msg) = msg else {
-                            continue;
-                        };
+                        println!("[RECV] {:?}", msg);
+
+                        if let Some(decode) = decode.clone() {
+                            msg = decode(msg);
+                        }
 
                         let list = channel_list.lock().await;
 
                         for channel in &*list {
-                            if *channel.get_topic().await != rt_msg.topic {
+                            if *channel.get_topic().await != msg.topic {
                                 continue;
                             }
                             let _ = channel.get_tx().await.send(msg.clone());
                         }
-
-                        println!("[RECV] {:?}", msg);
-
-                        let _ = ws_rx_tx.send(msg);
                     }
 
                     let mut state = recv_state.lock().await;
@@ -387,7 +387,7 @@ impl RealtimeClient {
             let heartbeat_task = self.rt.spawn(async move {
                 loop {
                     sleep(hb_ivl).await;
-                    let _ = hb_tx.send(RealtimeMessage::heartbeat().into());
+                    let _ = hb_tx.send(RealtimeMessage::heartbeat());
                 }
             });
 
@@ -401,7 +401,6 @@ impl RealtimeClient {
             self.join_handles.push(heartbeat_task);
 
             self.ws_tx = Some(ws_tx_tx);
-            self.ws_rx = Some(ws_rx_rx);
 
             let mut channels = self.channels.lock().await;
 
@@ -510,8 +509,8 @@ pub struct RealtimeClientBuilder {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
-    decode: Option<Box<dyn Fn(RealtimeMessage) -> RealtimeMessage + Send>>,
+    encode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>, // TODO interceptor type
+    decode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
     connection_timeout: Duration,
@@ -651,18 +650,12 @@ impl RealtimeClientBuilder {
         self
     }
 
-    pub fn encode(
-        mut self,
-        encode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static + Send,
-    ) -> Self {
+    pub fn encode(mut self, encode: fn(RealtimeMessage) -> RealtimeMessage) -> Self {
         self.encode = Some(Box::new(encode));
         self
     }
 
-    pub fn decode(
-        mut self,
-        decode: impl Fn(RealtimeMessage) -> RealtimeMessage + 'static + Send,
-    ) -> Self {
+    pub fn decode(mut self, decode: fn(RealtimeMessage) -> RealtimeMessage) -> Self {
         self.decode = Some(Box::new(decode));
         self
     }
@@ -698,7 +691,6 @@ impl RealtimeClientBuilder {
             next_ref: Uuid::new_v4(),
             state: Arc::new(Mutex::new(ClientState::Closed)),
             ws_tx: None,
-            ws_rx: None,
             channels: Arc::new(Mutex::new(Vec::new())),
             messages_this_second: Vec::new(),
             middleware: HashMap::new(),

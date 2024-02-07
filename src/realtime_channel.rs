@@ -49,7 +49,7 @@ pub enum ChannelState {
 #[derive(Debug)]
 pub enum ChannelSendError {
     NoChannel,
-    SendError(SendError<Message>),
+    SendError(SendError<RealtimeMessage>),
     ChannelError(ChannelState),
 }
 
@@ -62,14 +62,14 @@ pub enum ChannelManagerMessage {
         payload: BroadcastPayload,
     },
     ClientTx {
-        new_tx: UnboundedSender<Message>,
+        new_tx: UnboundedSender<RealtimeMessage>,
         res: Responder<()>,
     },
     State {
         res: Responder<ChannelState>,
     },
     GetTx {
-        res: Responder<UnboundedSender<Message>>,
+        res: Responder<UnboundedSender<RealtimeMessage>>,
     },
     GetTopic {
         res: Responder<String>,
@@ -110,7 +110,7 @@ impl ChannelManager {
         let _ = self.send(ChannelManagerMessage::GetTopic { res: tx });
         rx.await.unwrap()
     }
-    pub async fn get_tx(&self) -> UnboundedSender<Message> {
+    pub async fn get_tx(&self) -> UnboundedSender<RealtimeMessage> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::GetTx { res: tx });
         rx.await.unwrap()
@@ -150,10 +150,10 @@ struct RealtimeChannel {
     pub(crate) id: Uuid,
     pub(crate) cdc_callbacks: Arc<Mutex<HashMap<PostgresChangesEvent, Vec<CdcCallback>>>>,
     pub(crate) broadcast_callbacks: Arc<Mutex<HashMap<String, Vec<BroadcastCallback>>>>,
-    pub(crate) client_tx: mpsc::UnboundedSender<Message>,
+    pub(crate) client_tx: mpsc::UnboundedSender<RealtimeMessage>,
     join_payload: JoinPayload,
     presence: RealtimePresence,
-    pub(crate) tx: Option<UnboundedSender<Message>>,
+    pub(crate) tx: Option<UnboundedSender<RealtimeMessage>>,
     pub(crate) manager_channel: (
         UnboundedSender<ChannelManagerMessage>,
         UnboundedReceiver<ChannelManagerMessage>,
@@ -225,7 +225,7 @@ impl RealtimeChannel {
     }
 
     fn client_recv(&mut self) {
-        let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<Message>();
+        let (channel_tx, mut channel_rx) = mpsc::unbounded_channel::<RealtimeMessage>();
         self.tx = Some(channel_tx);
         let task_state = self.state.clone();
         let task_cdc_cbs = self.cdc_callbacks.clone();
@@ -234,9 +234,6 @@ impl RealtimeChannel {
 
         self.message_handle = Some(self.rt.spawn(async move {
             while let Some(message) = channel_rx.recv().await {
-                let message: RealtimeMessage =
-                    serde_json::from_str(message.to_text().unwrap()).unwrap();
-
                 // get locks
                 let mut broadcast_callbacks = task_bc_cbs.lock().await;
                 let mut cdc_callbacks = task_cdc_cbs.lock().await;
@@ -526,7 +523,7 @@ impl RealtimeChannelBuilder {
     //
     fn build_common(
         self,
-        client_tx: UnboundedSender<Message>,
+        client_tx: UnboundedSender<RealtimeMessage>,
         access_token: String,
         rt: Arc<Runtime>,
     ) -> ChannelManager {
