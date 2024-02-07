@@ -1,8 +1,8 @@
 use std::{collections::HashMap, time::Duration};
 
 use realtime_rs::{
-    message::payload::BroadcastConfig,
-    sync::{ChannelManagerMessage, RealtimeChannelBuilder, RealtimeClient},
+    message::payload::BroadcastConfig, realtime_channel::RealtimeChannelBuilder,
+    realtime_client::RealtimeClientBuilder,
 };
 use tokio::time::sleep;
 
@@ -11,10 +11,9 @@ async fn main() {
     let endpoint = "http://127.0.0.1:54321";
     let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
 
-    let client = RealtimeClient::builder(endpoint, access_token)
+    let client = RealtimeClientBuilder::new(endpoint, access_token)
         .heartbeat_interval(Duration::from_secs(29))
-        .build()
-        .await;
+        .build();
 
     client.connect().await;
 
@@ -24,7 +23,7 @@ async fn main() {
             ack: false,
         })
         .on_broadcast("test_event", |map| println!("Event get! {:?}", map))
-        .build(client.clone())
+        .build(&client)
         .await
         .unwrap();
 
@@ -43,9 +42,7 @@ async fn main() {
             count += 1;
             println!("SENDING {}", count);
             payload.payload.insert("count".into(), count.into());
-            let _ = channel.send(ChannelManagerMessage::Broadcast {
-                payload: payload.clone(),
-            });
+            let _ = channel.broadcast(payload.clone());
             sleep(Duration::from_millis(1000)).await;
         }
     })

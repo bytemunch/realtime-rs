@@ -2,7 +2,8 @@ use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::payload::{BroadcastConfig, BroadcastPayload, Payload},
-    sync::{NextMessageError, RealtimeClient},
+    realtime_channel::RealtimeChannelBuilder,
+    realtime_client::{ClientState, RealtimeClientBuilder},
 };
 
 fn main() {
@@ -20,7 +21,7 @@ fn main() {
             .to_string()
     }
 
-    let mut client = RealtimeClient::builder(url, anon_key)
+    let client = RealtimeClientBuilder::new(url, anon_key)
         .encode(|mut msg| {
             println!("Encoder running...");
             match msg.payload {
@@ -56,23 +57,21 @@ fn main() {
 
             msg
         })
-        .build();
+        .build()
+        .to_sync();
 
-    match client.connect() {
-        Ok(_) => {}
-        Err(e) => panic!("Couldn't connect! {:?}", e),
-    };
+    client.connect();
 
-    let channel_id = client
-        .channel("reverse_encoder")
+    let channel = RealtimeChannelBuilder::new("reverse_encoder")
         .broadcast(BroadcastConfig {
             broadcast_self: true,
             ack: Default::default(),
         })
         .on_broadcast("test", |b| println!("[BC RECV] {:?}", b.get("message")))
-        .build(&mut client);
+        .build_sync(&client)
+        .unwrap();
 
-    let _ = client.block_until_subscribed(channel_id);
+    channel.subscribe_blocking().unwrap();
 
     let mut test_payload = HashMap::new();
 
@@ -81,20 +80,15 @@ fn main() {
         serde_json::to_value("Reverse me!").unwrap(),
     );
 
-    let _ = client
-        .get_channel_mut(channel_id)
-        .unwrap()
-        .broadcast(BroadcastPayload::new("test", test_payload));
+    let test_payload = BroadcastPayload::new("test", test_payload);
+
+    channel.broadcast(test_payload);
 
     loop {
-        match client.next_message() {
-            Ok(topic) => {
-                println!("Message forwarded to {:?}", topic)
-            }
-            Err(NextMessageError::WouldBlock) => {}
-            Err(_e) => {
-                //println!("NextMessageError: {:?}", e)
-            }
+        if client.get_state().unwrap() == ClientState::Closed {
+            break;
         }
     }
+
+    println!("Client closed.");
 }

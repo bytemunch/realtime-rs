@@ -2,7 +2,7 @@ use std::{collections::HashMap, env};
 
 use realtime_rs::{
     message::presence::PresenceEvent,
-    sync::{ChannelState, ConnectionState, NextMessageError, RealtimeClient},
+    sync::{ChannelState, ClientState, NextMessageError, RealtimeClient},
 };
 
 fn main() {
@@ -38,7 +38,7 @@ fn main() {
     let mut sent_once = false;
 
     loop {
-        if client.get_status() == ConnectionState::Closed {
+        if client.get_status() == ClientState::Closed {
             break;
         }
 

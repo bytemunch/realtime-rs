@@ -1,48 +1,53 @@
-use std::{cell::RefCell, collections::HashMap, env, rc::Rc};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 
 use realtime_rs::{
     message::{payload::PostgresChangesEvent, PostgresChangeFilter},
-    sync::{ConnectionState, NextMessageError, RealtimeClient},
+    realtime_channel::RealtimeChannelBuilder,
+    realtime_client::{ClientState, RealtimeClientBuilder},
 };
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let event_counter = Rc::new(RefCell::new(0));
+    let event_counter = Arc::new(Mutex::new(0));
 
-    let mut gotrue = go_true::Client::new("http://192.168.64.7:9999".to_string());
+    let mut gotrue = go_true::Client::new("http://192.168.64.5:9999".to_string());
 
-    let Ok(session) = gotrue
-        .sign_in(
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let Ok(session) = rt.block_on({
+        gotrue.sign_in(
             go_true::EmailOrPhone::Email("test@example.com".into()),
             &String::from("password"),
         )
-        .await
-    else {
-        return println!("Login error");
+    }) else {
+        return println!("Auth broke");
     };
 
-    let mut client = RealtimeClient::builder(url, anon_key)
+    let client = RealtimeClientBuilder::new(url, anon_key)
         .access_token(session.access_token)
-        .build();
+        .build()
+        .to_sync();
 
-    match client.connect() {
-        Ok(_) => {}
-        Err(e) => panic!("Couldn't connect! {:?}", e), // TODO retry routine
-    };
+    client.connect();
 
-    let rc = Rc::clone(&event_counter);
+    let rc = Arc::clone(&event_counter);
 
     let on_change = move |msg: &_| {
         println!("CHANGE");
-        rc.replace_with(|&mut count| count + 1);
-        println!("Event #{} | Channel 1:\n{:?}", rc.borrow(), msg);
+        let mut c = rc.lock().unwrap();
+        *c += 1;
+        println!("Event #{} | Channel 1:\n{:?}", *c, msg);
     };
 
-    let channel_id = client
-        .channel("topic")
+    let channel = RealtimeChannelBuilder::new("topic")
         .on_postgres_change(
             PostgresChangesEvent::All,
             PostgresChangeFilter {
@@ -55,28 +60,13 @@ async fn main() {
         .presence(realtime_rs::message::payload::PresenceConfig {
             key: Some("test_key".into()),
         })
-        .build(&mut client);
+        .build_sync(&client);
 
-    let _ = client.block_until_subscribed(channel_id);
-
-    client
-        .get_channel_mut(channel_id)
-        .unwrap()
-        .track(HashMap::new());
+    channel.unwrap().subscribe_blocking().unwrap();
 
     loop {
-        if client.get_status() == ConnectionState::Closed {
+        if client.get_state().unwrap() == ClientState::Closed {
             break;
-        }
-
-        match client.next_message() {
-            Ok(topic) => {
-                println!("Message forwarded to {:?}", topic)
-            }
-            Err(NextMessageError::WouldBlock) => {}
-            Err(e) => {
-                panic!("NextMessageError: {:?}", e);
-            }
         }
     }
 
