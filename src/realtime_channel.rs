@@ -56,6 +56,9 @@ pub enum ChannelSendError {
 
 pub enum ChannelManagerMessage {
     Subscribe,
+    Unsubscribe {
+        res: Responder<Result<ChannelState, ChannelSendError>>,
+    },
     SubscribeBlocking {
         res: Responder<()>,
     },
@@ -85,9 +88,12 @@ pub enum ChannelManagerMessage {
     PresenceUntrack {
         res: Responder<()>,
     },
+    ReAuth {
+        res: Responder<()>,
+    },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChannelManager {
     pub(crate) tx: UnboundedSender<ChannelManagerMessage>,
     rt: Arc<Runtime>,
@@ -102,6 +108,11 @@ impl ChannelManager {
     }
     pub fn subscribe(&self) {
         let _ = self.send(ChannelManagerMessage::Subscribe);
+    }
+    pub async fn unsubscribe(&self) -> Result<Result<ChannelState, ChannelSendError>, RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::Unsubscribe { res: tx });
+        rx.await
     }
     pub async fn subscribe_blocking(&self) -> Result<(), oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
@@ -119,6 +130,11 @@ impl ChannelManager {
     pub async fn untrack(&self) -> Result<(), RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::PresenceUntrack { res: tx });
+        rx.await
+    }
+    pub async fn reauth(&self) -> Result<(), RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::ReAuth { res: tx });
         rx.await
     }
     pub async fn get_state(&self) -> Result<ChannelState, RecvError> {
@@ -161,6 +177,9 @@ impl ChannelManagerSync {
     pub fn subscribe(&self) {
         self.inner.subscribe()
     }
+    pub fn unsubscribe(&self) -> Result<Result<ChannelState, ChannelSendError>, RecvError> {
+        self.inner.rt.block_on(self.inner.unsubscribe())
+    }
     pub fn subscribe_blocking(&self) -> Result<(), RecvError> {
         self.inner.rt.block_on(self.inner.subscribe_blocking())
     }
@@ -178,6 +197,19 @@ impl ChannelManagerSync {
     }
     pub fn untrack(&self) -> Result<(), RecvError> {
         self.inner.rt.block_on(self.inner.untrack())
+    }
+    pub fn reauth(&self) -> Result<(), RecvError> {
+        self.inner.rt.block_on(self.inner.reauth())
+    }
+}
+
+impl<'a> FromIterator<&'a mut ChannelManager> for Vec<ChannelManager> {
+    fn from_iter<T: IntoIterator<Item = &'a mut ChannelManager>>(iter: T) -> Self {
+        let mut vec = Vec::new();
+        for c in iter {
+            vec.push(c.clone());
+        }
+        vec
     }
 }
 
@@ -198,6 +230,7 @@ struct RealtimeChannel {
     ),
     pub(crate) message_handle: Option<JoinHandle<()>>,
     rt: Arc<Runtime>,
+    access_token: Arc<Mutex<String>>,
 }
 
 impl RealtimeChannel {
@@ -206,6 +239,9 @@ impl RealtimeChannel {
             match control_message {
                 ChannelManagerMessage::Subscribe => {
                     self.subscribe().await;
+                }
+                ChannelManagerMessage::Unsubscribe { res } => {
+                    res.send(self.unsubscribe().await).unwrap();
                 }
                 ChannelManagerMessage::SubscribeBlocking { res } => {
                     self.subscribe_blocking(res).await;
@@ -235,6 +271,9 @@ impl RealtimeChannel {
                 ChannelManagerMessage::GetPresenceState { res } => {
                     let presence = self.presence.lock().await;
                     res.send(presence.state.clone()).unwrap();
+                }
+                ChannelManagerMessage::ReAuth { res } => {
+                    res.send(self.reauth().await.unwrap()).unwrap();
                 } // TODO kill message
             }
         }
@@ -348,10 +387,12 @@ impl RealtimeChannel {
     /// Leave the channel
     async fn unsubscribe(&mut self) -> Result<ChannelState, ChannelSendError> {
         let state = self.state.clone();
-        let mut state = state.lock().await;
-        if *state == ChannelState::Closed || *state == ChannelState::Leaving {
-            let s = state.clone();
-            return Ok(s);
+        {
+            let state = state.lock().await;
+            if *state == ChannelState::Closed || *state == ChannelState::Leaving {
+                let s = state.clone();
+                return Ok(s);
+            }
         }
 
         match self
@@ -364,6 +405,7 @@ impl RealtimeChannel {
             .await
         {
             Ok(()) => {
+                let mut state = state.lock().await;
                 *state = ChannelState::Leaving;
                 Ok(*state)
             }
@@ -421,9 +463,10 @@ impl RealtimeChannel {
         .await
     }
 
-    async fn set_auth(&mut self, access_token: String) -> Result<(), ChannelSendError> {
-        // TODO access token should be an Arc on client, this fn just sends an update message
-        // magically populated by self
+    async fn reauth(&mut self) -> Result<(), ChannelSendError> {
+        // TODO test this
+        let access_token = self.access_token.lock().await;
+
         self.join_payload.access_token = access_token.clone();
 
         let state = self.state.lock().await;
@@ -437,20 +480,15 @@ impl RealtimeChannel {
         let access_token_message = RealtimeMessage {
             event: MessageEvent::AccessToken,
             topic: self.topic.clone(),
-            payload: Payload::AccessToken(AccessTokenPayload { access_token }),
+            payload: Payload::AccessToken(AccessTokenPayload {
+                access_token: access_token.clone(),
+            }),
             ..Default::default()
         };
 
-        self.send(access_token_message).await
-    }
-}
+        drop(access_token);
 
-impl Debug for RealtimeChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "RealtimeChannel {{ name: {:?}, callbacks: [TODO DEBUG]}}",
-            self.topic
-        ))
+        self.send(access_token_message).await
     }
 }
 
@@ -577,6 +615,7 @@ impl RealtimeChannelBuilder {
         self,
         client_tx: UnboundedSender<RealtimeMessage>,
         access_token: String,
+        access_token_arc: Arc<Mutex<String>>,
         rt: Arc<Runtime>,
     ) -> ChannelManager {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
@@ -585,6 +624,7 @@ impl RealtimeChannelBuilder {
         let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelManagerMessage>();
 
         let mut channel = RealtimeChannel {
+            access_token: access_token_arc,
             rt: rt.clone(),
             tx: None,
             topic: self.topic,
@@ -621,8 +661,10 @@ impl RealtimeChannelBuilder {
     pub fn build_sync(self, client: &ClientManagerSync) -> Result<ChannelManagerSync, RecvError> {
         let client_tx = client.clone().get_ws_tx().unwrap();
         let access_token = client.clone().get_access_token().unwrap();
+        let access_token_arc = client.clone().get_access_token_arc().unwrap();
 
-        let channel_manager = self.build_common(client_tx, access_token, client.get_rt());
+        let channel_manager =
+            self.build_common(client_tx, access_token, access_token_arc, client.get_rt());
 
         client.add_channel(channel_manager.clone()).unwrap();
 
@@ -632,8 +674,10 @@ impl RealtimeChannelBuilder {
     pub async fn build(self, client: &ClientManager) -> Result<ChannelManager, RecvError> {
         let client_tx = client.clone().get_ws_tx().await?;
         let access_token = client.clone().get_access_token().await?;
+        let access_token_arc = client.clone().get_access_token_arc().await?;
 
-        let channel_manager = self.build_common(client_tx, access_token, client.get_rt());
+        let channel_manager =
+            self.build_common(client_tx, access_token, access_token_arc, client.get_rt());
 
         client.add_channel(channel_manager.clone()).await.unwrap();
 

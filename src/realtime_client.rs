@@ -19,7 +19,7 @@ use uuid::Uuid;
 use futures_util::{pin_mut, StreamExt};
 
 use crate::message::RealtimeMessage;
-use crate::realtime_channel::{ChannelManager, ChannelManagerMessage};
+use crate::realtime_channel::{ChannelManager, ChannelManagerMessage, ChannelState};
 use crate::Responder;
 
 /// Connection state of [RealtimeClient]
@@ -54,11 +54,17 @@ pub enum ClientManagerMessage {
     Connect {
         res: Responder<()>,
     },
+    Disconnect {
+        res: Responder<()>,
+    },
     GetWsTx {
         res: Responder<UnboundedSender<RealtimeMessage>>,
     },
     GetAccessToken {
         res: Responder<String>,
+    },
+    GetAccessTokenArc {
+        res: Responder<Arc<Mutex<String>>>,
     },
     GetState {
         res: Responder<ClientState>,
@@ -88,6 +94,11 @@ impl ClientManager {
         let _ = self.send(ClientManagerMessage::Connect { res: tx });
         rx.await.unwrap()
     }
+    pub async fn disconnect(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::Disconnect { res: tx });
+        rx.await.unwrap()
+    }
     pub async fn get_state(&self) -> Result<ClientState, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::GetState { res: tx });
@@ -106,6 +117,13 @@ impl ClientManager {
     pub async fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::GetAccessToken { res: tx });
+        rx.await
+    }
+    pub async fn get_access_token_arc(
+        &self,
+    ) -> Result<Arc<Mutex<String>>, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::GetAccessTokenArc { res: tx });
         rx.await
     }
     pub async fn set_access_token(
@@ -147,6 +165,9 @@ impl ClientManagerSync {
     pub fn connect(&self) {
         self.inner.rt.block_on(self.inner.connect());
     }
+    pub fn disconnect(&self) {
+        self.inner.rt.block_on(self.inner.disconnect());
+    }
     pub fn get_ws_tx(&self) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_ws_tx())
     }
@@ -155,6 +176,9 @@ impl ClientManagerSync {
     }
     pub fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_access_token())
+    }
+    pub fn get_access_token_arc(&self) -> Result<Arc<Mutex<String>>, oneshot::error::RecvError> {
+        self.inner.rt.block_on(self.inner.get_access_token_arc())
     }
     pub fn set_access_token(
         &self,
@@ -207,13 +231,6 @@ struct RealtimeClient {
     rt: Arc<Runtime>,
 }
 
-impl Debug for RealtimeClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO this is horrid
-        f.write_fmt(format_args!("todo"))
-    }
-}
-
 impl RealtimeClient {
     async fn manager_recv(&mut self) {
         while let Some(control_message) = self.manager_channel.1.recv().await {
@@ -232,6 +249,11 @@ impl RealtimeClient {
                 ClientManagerMessage::SetAccessToken { access_token, res } => {
                     let mut token = self.access_token.lock().await;
                     *token = access_token;
+
+                    let channels = self.channels.lock().await;
+                    for c in channels.iter() {
+                        c.reauth().await.unwrap();
+                    }
                     let _ = res.send(token.clone());
                 }
                 ClientManagerMessage::AddChannel { manager, res } => {
@@ -242,6 +264,12 @@ impl RealtimeClient {
                 ClientManagerMessage::GetState { res } => {
                     let s = self.state.lock().await;
                     res.send(s.clone()).unwrap();
+                }
+                ClientManagerMessage::GetAccessTokenArc { res } => {
+                    res.send(self.access_token.clone()).unwrap();
+                }
+                ClientManagerMessage::Disconnect { res } => {
+                    res.send(self.disconnect().await).unwrap();
                 }
             }
         }
@@ -316,14 +344,35 @@ impl RealtimeClient {
         Ok(request)
     }
 
-    async fn connect_ws(&mut self) -> Result<(), ConnectError> {
-        println!("Connecting...");
+    fn clear_tasks(&mut self) {
         // Clear current async tasks
         for t in &mut self.join_handles {
             t.abort();
         }
 
         self.join_handles.clear();
+    }
+
+    async fn clear_channels(&mut self) {
+        let c = self.channels.lock().await;
+        for c in c.iter() {
+            c.unsubscribe().await.unwrap().unwrap();
+        }
+    }
+
+    async fn disconnect(&mut self) {
+        self.clear_channels().await;
+        self.clear_tasks();
+
+        let mut state = self.state.lock().await;
+        *state = ClientState::Closed;
+        println!("Disconnected!");
+    }
+
+    async fn connect_ws(&mut self) -> Result<(), ConnectError> {
+        println!("Connecting...");
+
+        self.clear_tasks();
 
         let request = self.build_request().await?;
 
@@ -333,6 +382,13 @@ impl RealtimeClient {
 
             let Ok((ws_stream, _res)) = connect_async(request.clone()).await else {
                 reconnect_attempts += 1;
+                if reconnect_attempts >= self.reconnect_max_attempts {
+                    println!(
+                        "Connection failed, max retries exceeded ({}/{})",
+                        reconnect_attempts, self.reconnect_max_attempts
+                    );
+                    return Err(ConnectError::MaxRetries);
+                }
                 println!(
                     "Connection failed. Retrying (attempt #{})",
                     reconnect_attempts
@@ -350,11 +406,13 @@ impl RealtimeClient {
             let send_task = self.rt.spawn(async move {
                 let sender = UnboundedReceiverStream::new(ws_tx_rx)
                     .map(|mut x: RealtimeMessage| {
-                        // TODO encode here
                         if let Some(encode) = encode.clone() {
                             x = encode(x);
                         }
+                        // TODO throttling. READING: drop or queue throttled messages? check what
+                        // official clients do.
                         println!("[SEND] {:?}", x);
+
                         Ok(x.into())
                     })
                     .forward(write);
@@ -390,7 +448,18 @@ impl RealtimeClient {
                             msg = decode(msg);
                         }
 
-                        let list = channel_list.lock().await;
+                        let mut list = channel_list.lock().await;
+
+                        *list = tokio_stream::iter(list.clone())
+                            .filter_map(|c| async {
+                                if c.get_state().await.unwrap() != ChannelState::Closed {
+                                    Some(c)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                            .await;
 
                         for channel in &*list {
                             if *channel.get_topic().await != msg.topic {
@@ -432,8 +501,6 @@ impl RealtimeClient {
             self.ws_tx = Some(ws_tx_tx);
 
             let mut channels = self.channels.lock().await;
-
-            // TODO filter out finished channels here
 
             for manager in channels.iter_mut() {
                 let (cc_tx, cc_rx) = oneshot::channel();
@@ -501,12 +568,6 @@ impl ReconnectFn {
 impl Default for ReconnectFn {
     fn default() -> Self {
         Self(Box::new(backoff))
-    }
-}
-
-impl Debug for ReconnectFn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TODO reconnect fn debug")
     }
 }
 
@@ -720,6 +781,9 @@ impl RealtimeClientBuilder {
         };
 
         let _handle = rt.spawn(async move { client.manager_recv().await });
+
+        // TODO connect on build
+        // TODO disconnect returns a preconfigured builder?
 
         manager
     }

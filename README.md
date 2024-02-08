@@ -1,77 +1,136 @@
 # Supabase realtime-rs
 
-Synchronous websocket client wrapper for Supabase realtime. WIP, API is solid as water.
+Async + sync websocket client wrappers for Supabase realtime.
 
-## Progress
-
-### Working so far
-
-#### Core
-
- - [x] Websocket client
- - [x] Channels
- - [x] Granular Callbacks (`INSERT`, `UPDATE`, `DELETE` and `ALL` (`*`))
- - [x] Heartbeat
- - [x] Client states
- - [x] Disconnecting client
- - [x] Single threaded client
- - [x] Connection timeout + retry
- - [x] Configurable reconnect max attempts
- - [x] Auto reconnect
- - [x] Configurable client-side message throttling
- - [x] TLS websockets
- - [x] Docs
-    > - [x] Make `pub(crate)` anything that doesn't need to be user facing
- - [x] Encode / Decode
-    > Basic user provided function support.
-
-#### Channels
-
- - [x] Broadcast
- - [x] Gracefully disconnecting Channels
-   > more work and testing needed here
- - [x] Channel states
- - [x] Client `set_auth` + cascade through channels
- - [x] Presence
- - [x] Blocking `.subscribe()`
-   > currently implemented on the client due to my skill issues with the borrow checker. plan to move it to channel once im good at coding
-
-#### Extra
-
- - [x] Middleware
-   > Saw the js client lib offering overrides for system functions and such, I figure middlewares for received messages can fill this gap
-   > May be useless
- - [x] Placeholder function for email/password auth (immediately deprecated in favour of gotrue-rs or auth-rs or whatever it will be called.)
- - [x] Builder patterns for client and channel
- - [x] Example: CLI broadcast chatroom with active user list (accessed with a `/online` command)
- - [x] Example: Pull data out of closure and modify state in a higher scope
-   > `event_counter` in `examples/cdc.rs`, `alias` in `examples/chatroom.rs`. Uses `Rc<RefCell<_>>`.
-
-### TODOs
+## Installation
 
 
- - [ ] Async by default, maybe provide sync helper functions
-    > The rest of the supabase rs ecosystem is async, so this should be too.
-    >> TOKIOOOOOOOOOOOOO
 
- - [ ] Lock down a clean API
- - [ ] Anything else I can find to do before writing tests
- - [ ] Tests
-    > Many cases should be handled with docs code examples
- - [ ] Set up CI
+## Usage
+
+### Sync API
+
+`examples/broadcast_sync.rs`
+```rs
+use std::{collections::HashMap, thread::sleep, time::Duration};
+
+use realtime_rs::{
+    message::payload::BroadcastConfig, realtime_channel::RealtimeChannelBuilder,
+    realtime_client::RealtimeClientBuilder,
+};
+
+fn main() {
+    let endpoint = "http://127.0.0.1:54321";
+    let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
+
+    let client = RealtimeClientBuilder::new(endpoint, access_token)
+        .heartbeat_interval(Duration::from_secs(29))
+        .build()
+        .to_sync();
+
+    client.connect();
+
+    let channel = RealtimeChannelBuilder::new("TestTopic")
+        .broadcast(BroadcastConfig {
+            broadcast_self: true,
+            ack: false,
+        })
+        .on_broadcast("test_event", |map| println!("Event get! {:?}", map))
+        .build_sync(&client)
+        .unwrap();
+
+    channel.subscribe();
+
+    let mut payload = realtime_rs::message::payload::BroadcastPayload {
+        event: "test_event".into(),
+        payload: HashMap::new(),
+        ..Default::default()
+    };
+
+    let mut count = 0;
+
+    loop {
+        count += 1;
+        println!("SENDING {}", count);
+        payload.payload.insert("count".into(), count.into());
+        let _ = channel.broadcast(payload.clone());
+
+        sleep(Duration::from_millis(1000));
+    }
+}
+```
+
+### Async API
+
+Internally the crate uses `tokio`.
+
+`examples/broadcast_async.rs`
+```rs
+use std::{collections::HashMap, time::Duration};
+
+use realtime_rs::{
+    message::payload::BroadcastConfig, realtime_channel::RealtimeChannelBuilder,
+    realtime_client::RealtimeClientBuilder,
+};
+use tokio::time::sleep;
+
+#[tokio::main]
+async fn main() {
+    let endpoint = "http://127.0.0.1:54321";
+    let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
+
+    let client = RealtimeClientBuilder::new(endpoint, access_token)
+        .heartbeat_interval(Duration::from_secs(29))
+        .build();
+
+    client.connect().await;
+
+    let channel = RealtimeChannelBuilder::new("TestTopic")
+        .broadcast(BroadcastConfig {
+            broadcast_self: true,
+            ack: false,
+        })
+        .on_broadcast("test_event", |map| println!("Event get! {:?}", map))
+        .build(&client)
+        .await
+        .unwrap();
+
+    channel.subscribe_blocking().await.unwrap();
+
+    let mut payload = realtime_rs::message::payload::BroadcastPayload {
+        event: "test_event".into(),
+        payload: HashMap::new(),
+        ..Default::default()
+    };
+
+    let mut count = 0;
+
+    tokio::spawn(async move {
+        loop {
+            count += 1;
+            println!("SENDING {}", count);
+            payload.payload.insert("count".into(), count.into());
+            let _ = channel.broadcast(payload.clone());
+            sleep(Duration::from_millis(1000)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+```
+
+See `/examples` for more!
+
+## TODOs
+
+ - [ ] Connection timeouts
+ - [ ] Documentation + Doctestable examples
+ - [ ] Custom middlewarey message mutating functions
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
     > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
-
- #### Broken by Async:
-  - [x] Autoreconnect
-  - [ ] Block until subscribed
-  - [ ] remove all channels
-  - [x] Socket R/W
-  - [ ] Disconnect
-  - [ ] Throttling
-  - [ ] literally all of presence
-  - [x] Monitoring
+ - [ ] Throttling
+ - [ ] Auth: Test cascading access_token update
 
  #### Examples
 

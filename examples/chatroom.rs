@@ -1,3 +1,8 @@
+// WARNING!
+// This example is a spaghetti mess, I was working quickly to get a PoC done.
+// Probably FULL of bad practices and anti-patterns
+// But it proves the concept of a broadcast-based chatroom.
+
 use std::{
     collections::HashMap,
     env,
@@ -15,7 +20,7 @@ use realtime_rs::{
         presence::PresenceEvent,
     },
     realtime_channel::RealtimeChannelBuilder,
-    realtime_client::RealtimeClientBuilder,
+    realtime_client::{ClientState, RealtimeClientBuilder},
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -95,7 +100,7 @@ async fn main() {
 
     let a_guard = alias.lock().unwrap();
 
-    println!("You are now chatting as [{}]\n\nCommands:\n\t/online\t\t:Show online users\n\t/alias NAME\t:Change your alias\n", a_guard);
+    println!("You are now chatting as [{}]\n\nCommands:\n\t/online\t\tShow online users\n\t/alias NAME\tChange your alias\n\t/quit\t\tExit the chatroom", a_guard);
 
     let on_broadcast_alias = alias.clone();
     let on_join_alias = alias.clone();
@@ -176,6 +181,10 @@ async fn main() {
     drop(a_guard);
 
     loop {
+        if client.get_state().await.unwrap() == ClientState::Closed {
+            break;
+        }
+
         match stdin_rx.try_recv() {
             Ok(input) => {
                 let regex = Regex::new(r"(\/)([\S]*)$").unwrap();
@@ -199,6 +208,13 @@ async fn main() {
 
                             let a_guard = alias.lock().unwrap();
                             print!("\r{}\r{}", " ".repeat(50), prompt(a_guard.as_str()));
+                            stdout().flush().unwrap();
+                        }
+                        "quit" => {
+                            print!("\rGoodbye! \n");
+
+                            client.disconnect().await;
+
                             stdout().flush().unwrap();
                         }
                         _ => {
