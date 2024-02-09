@@ -56,12 +56,12 @@ pub struct PostgresChangeFilter {
 }
 
 impl PostgresChangeFilter {
-    pub(crate) fn check(&self, message: RealtimeMessage) -> Option<RealtimeMessage> {
+    pub(crate) fn check(&self, message: &RealtimeMessage) -> bool {
         let Payload::PostgresChanges(payload) = &message.payload else {
             if DEBUG {
                 println!("Dropping non CDC message: {:?}", message);
             }
-            return None;
+            return false;
         };
 
         if let Some(table) = &self.table {
@@ -69,7 +69,7 @@ impl PostgresChangeFilter {
                 if DEBUG {
                     println!("Dropping mismatched table message: {:?}", message);
                 }
-                return None;
+                return false;
             }
         }
 
@@ -78,13 +78,13 @@ impl PostgresChangeFilter {
         }
 
         if payload.data.schema != self.schema {
-            return None;
+            return false;
         }
 
         if DEBUG {
             println!("Dropping mismatched CDC event: {:?}", message);
         }
 
-        Some(message)
+        true
     }
 }

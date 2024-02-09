@@ -254,7 +254,7 @@ impl RealtimeChannel {
                     res.send(()).unwrap();
                 }
                 ChannelManagerMessage::GetState { res } => {
-                    res.send(self.state.lock().await.clone()).unwrap();
+                    res.send(*self.state.lock().await).unwrap();
                 }
                 ChannelManagerMessage::GetTx { res } => {
                     res.send(self.tx.clone().unwrap()).unwrap();
@@ -263,18 +263,21 @@ impl RealtimeChannel {
                     res.send(self.topic.clone()).unwrap();
                 }
                 ChannelManagerMessage::PresenceTrack { payload, res } => {
-                    res.send(self.track(payload).await.unwrap()).unwrap()
+                    self.track(payload).await.unwrap();
+                    res.send(()).unwrap();
                 }
                 ChannelManagerMessage::PresenceUntrack { res } => {
-                    res.send(self.untrack().await.unwrap()).unwrap()
+                    self.untrack().await.unwrap();
+                    res.send(()).unwrap()
                 }
                 ChannelManagerMessage::GetPresenceState { res } => {
                     let presence = self.presence.lock().await;
                     res.send(presence.state.clone()).unwrap();
                 }
                 ChannelManagerMessage::ReAuth { res } => {
-                    res.send(self.reauth().await.unwrap()).unwrap();
-                } // TODO kill message
+                    self.reauth().await.unwrap();
+                    res.send(()).unwrap();
+                }
             }
         }
     }
@@ -292,7 +295,7 @@ impl RealtimeChannel {
         *state = ChannelState::Joining;
         drop(state);
 
-        let _ = self.send(join_message.into()).await;
+        let _ = self.send(join_message).await;
     }
 
     async fn subscribe_blocking(&mut self, tx: Responder<()>) {
@@ -326,8 +329,6 @@ impl RealtimeChannel {
                 let mut broadcast_callbacks = task_bc_cbs.lock().await;
                 let mut cdc_callbacks = task_cdc_cbs.lock().await;
 
-                let test_message = message.clone(); // TODO fix dis
-
                 match message.payload {
                     Payload::Broadcast(payload) => {
                         if let Some(cb_vec) = broadcast_callbacks.get_mut(&payload.event) {
@@ -336,21 +337,21 @@ impl RealtimeChannel {
                             }
                         }
                     }
-                    Payload::PostgresChanges(payload) => {
+                    Payload::PostgresChanges(ref payload) => {
                         if let Some(cb_vec) = cdc_callbacks.get_mut(&payload.data.change_type) {
                             for cb in cb_vec {
-                                if cb.0.check(test_message.clone()).is_none() {
+                                if !cb.0.check(&message) {
                                     continue;
                                 }
-                                cb.1(&payload);
+                                cb.1(payload);
                             }
                         }
                         if let Some(cb_vec) = cdc_callbacks.get_mut(&PostgresChangesEvent::All) {
                             for cb in cb_vec {
-                                if cb.0.check(test_message.clone()).is_none() {
+                                if !cb.0.check(&message) {
                                     continue;
                                 }
-                                cb.1(&payload);
+                                cb.1(payload);
                             }
                         }
                     }
@@ -390,8 +391,7 @@ impl RealtimeChannel {
         {
             let state = state.lock().await;
             if *state == ChannelState::Closed || *state == ChannelState::Leaving {
-                let s = state.clone();
-                return Ok(s);
+                return Ok(*state);
             }
         }
 
@@ -444,10 +444,10 @@ impl RealtimeChannel {
         let state = self.state.lock().await;
 
         if *state == ChannelState::Leaving {
-            return Err(ChannelSendError::ChannelError(state.clone()));
+            return Err(ChannelSendError::ChannelError(*state));
         }
 
-        match self.client_tx.send(message.into()) {
+        match self.client_tx.send(message) {
             Ok(()) => Ok(()),
             Err(e) => Err(ChannelSendError::SendError(e)),
         }
@@ -609,8 +609,6 @@ impl RealtimeChannelBuilder {
         self
     }
 
-    // TODO on_message handler for sys messages
-    //
     fn build_common(
         self,
         client_tx: UnboundedSender<RealtimeMessage>,
@@ -653,9 +651,7 @@ impl RealtimeChannelBuilder {
 
         let _handle = rt.spawn(async move { channel.manager_recv().await });
 
-        let channel_manager = ChannelManager { tx, rt };
-
-        channel_manager
+        ChannelManager { tx, rt }
     }
 
     pub fn build_sync(self, client: &ClientManagerSync) -> Result<ChannelManagerSync, RecvError> {

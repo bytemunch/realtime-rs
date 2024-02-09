@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::SystemTime;
 use std::{collections::HashMap, time::Duration};
 
 use tokio::runtime::Runtime;
@@ -14,13 +13,13 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Request, Uri};
 
-use uuid::Uuid;
-
 use futures_util::{pin_mut, StreamExt};
 
 use crate::message::RealtimeMessage;
 use crate::realtime_channel::{ChannelManager, ChannelManagerMessage, ChannelState};
 use crate::Responder;
+
+pub type Interceptor = fn(RealtimeMessage) -> RealtimeMessage;
 
 /// Connection state of [RealtimeClient]
 #[derive(PartialEq, Debug, Default, Clone, Copy)]
@@ -207,22 +206,17 @@ struct RealtimeClient {
     state: Arc<Mutex<ClientState>>,
     ws_tx: Option<mpsc::UnboundedSender<RealtimeMessage>>,
     channels: Arc<Mutex<Vec<ChannelManager>>>,
-    messages_this_second: Vec<SystemTime>,
-    next_ref: Uuid,
-    middleware: HashMap<Uuid, Box<fn(RealtimeMessage) -> RealtimeMessage>>,
     // threads
     join_handles: Vec<JoinHandle<()>>,
     // builder options
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
-    decode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
+    encode: Option<Box<Interceptor>>,
+    decode: Option<Box<Interceptor>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
-    connection_timeout: Duration,
     endpoint: String,
-    max_events_per_second: usize,
     manager_channel: (
         UnboundedSender<ClientManagerMessage>,
         UnboundedReceiver<ClientManagerMessage>,
@@ -263,13 +257,14 @@ impl RealtimeClient {
                 }
                 ClientManagerMessage::GetState { res } => {
                     let s = self.state.lock().await;
-                    res.send(s.clone()).unwrap();
+                    res.send(*s).unwrap();
                 }
                 ClientManagerMessage::GetAccessTokenArc { res } => {
                     res.send(self.access_token.clone()).unwrap();
                 }
                 ClientManagerMessage::Disconnect { res } => {
-                    res.send(self.disconnect().await).unwrap();
+                    self.disconnect().await;
+                    res.send(()).unwrap();
                 }
             }
         }
@@ -480,8 +475,7 @@ impl RealtimeClient {
             });
 
             let hb_tx = ws_tx_tx.clone();
-            let hb_ivl = self.heartbeat_interval.clone(); // TODO heartbeat interval can be moved here,
-                                                          // no need to keep on RealtimeClient
+            let hb_ivl = self.heartbeat_interval;
             let heartbeat_task = self.rt.spawn(async move {
                 loop {
                     sleep(hb_ivl).await;
@@ -511,7 +505,7 @@ impl RealtimeClient {
 
                 let _ = cc_rx.await;
 
-                let _ = manager.subscribe();
+                manager.subscribe();
             }
 
             break;
@@ -528,29 +522,6 @@ impl RealtimeClient {
         list.push(channel.clone());
 
         channel
-    }
-
-    // TODO look into if middleware is needed?
-    /// Add a callback to run mutably on recieved [RealtimeMessage]s before any other registered
-    /// callbacks.
-    fn add_middleware(&mut self, middleware: Box<fn(RealtimeMessage) -> RealtimeMessage>) -> Uuid {
-        // TODO user defined middleware ordering
-        let uuid = Uuid::new_v4();
-        self.middleware.insert(uuid, middleware);
-        uuid
-    }
-
-    /// Remove middleware by it's [Uuid]
-    fn remove_middleware(&mut self, uuid: Uuid) -> &mut RealtimeClient {
-        self.middleware.remove(&uuid);
-        self
-    }
-
-    fn run_middleware(&self, mut message: RealtimeMessage) -> RealtimeMessage {
-        for middleware in self.middleware.values() {
-            message = middleware(message)
-        }
-        message
     }
 }
 
@@ -589,15 +560,13 @@ pub struct RealtimeClientBuilder {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>, // TODO interceptor type
-    decode: Option<Box<fn(RealtimeMessage) -> RealtimeMessage>>,
+    encode: Option<Box<Interceptor>>, // TODO interceptor type
+    decode: Option<Box<Interceptor>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
-    connection_timeout: Duration,
     auth_url: Option<String>,
     endpoint: String,
     access_token: String,
-    max_events_per_second: usize,
 }
 
 impl RealtimeClientBuilder {
@@ -614,11 +583,9 @@ impl RealtimeClientBuilder {
             decode: Default::default(),
             reconnect_interval: ReconnectFn(Box::new(backoff)),
             reconnect_max_attempts: usize::MAX,
-            connection_timeout: Duration::from_secs(10),
             auth_url: Default::default(),
             endpoint: endpoint.into(),
             access_token: anon_key.into(),
-            max_events_per_second: 10,
         }
     }
 
@@ -699,34 +666,11 @@ impl RealtimeClientBuilder {
         self
     }
 
-    /// Configure the duration to wait for a connection to succeed.
-    /// Default: 10 seconds
-    /// Minimum: 1 second
-    pub fn connection_timeout(mut self, timeout: Duration) -> Self {
-        // 1 sec min timeout
-        // TODO document the minimum timeout
-        let timeout = if timeout < Duration::from_secs(1) {
-            Duration::from_secs(1)
-        } else {
-            timeout
-        };
-
-        self.connection_timeout = timeout;
-        self
-    }
-
     /// Set the base URL for the auth server
     /// In live supabase deployments this is the same as the endpoint URL, and defaults as such.
     /// In local deployments this may need to be set manually
     pub fn auth_url(mut self, auth_url: impl Into<String>) -> Self {
         self.auth_url = Some(auth_url.into());
-        self
-    }
-
-    /// Sets the max messages we can send in a second.
-    /// Default: 10
-    pub fn max_events_per_second(mut self, count: usize) -> Self {
-        self.max_events_per_second = count;
         self
     }
 
@@ -764,16 +708,11 @@ impl RealtimeClientBuilder {
             decode: self.decode,
             reconnect_interval: self.reconnect_interval,
             reconnect_max_attempts: self.reconnect_max_attempts,
-            connection_timeout: self.connection_timeout,
             endpoint: self.endpoint,
             access_token: Arc::new(Mutex::new(self.access_token)),
-            max_events_per_second: self.max_events_per_second,
-            next_ref: Uuid::new_v4(),
             state: Arc::new(Mutex::new(ClientState::Closed)),
             ws_tx: None,
             channels: Arc::new(Mutex::new(Vec::new())),
-            messages_this_second: Vec::new(),
-            middleware: HashMap::new(),
             join_handles: Vec::new(),
             manager_channel: (mgr_tx, mgr_rx),
             manager: manager.clone(),
