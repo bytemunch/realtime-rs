@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 authors = ["sam edelsten"]
 license = "MIT OR Apache-2.0"
+description = "client library for supabase realtime. async and sync interfaces."
+homepage = "https://bytemunch.dev/projects/realtime-rs"
+documentation = "https://docs.rs/realtime-rs"
+readme = "README.md"
+repository = "https://github.com/bytemunch/realtime-rs"
+keywords = ["realtime", "supabase", "database", "cdc"]
+categories = ["database"]
 
 [dependencies]
 futures-channel = "0.3.30"
