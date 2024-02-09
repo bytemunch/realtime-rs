@@ -77,12 +77,11 @@ async fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let mut client = RealtimeClientBuilder::new(url, anon_key).build();
-    let mut gotrue = go_true::Client::new("http://192.168.64.5:9999".to_string());
+    let mut client = RealtimeClientBuilder::new(url, anon_key).connect();
 
     println!("Connecting...");
 
-    client.connect().await;
+    let mut gotrue = go_true::Client::new("http://192.168.64.5:9999".to_string());
 
     println!("Logging in...");
 
@@ -213,7 +212,7 @@ async fn main() {
                         "quit" => {
                             print!("\rGoodbye! \n");
 
-                            client.disconnect().await;
+                            client.disconnect().await.unwrap();
 
                             stdout().flush().unwrap();
                         }

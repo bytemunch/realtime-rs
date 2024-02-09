@@ -57,10 +57,8 @@ fn main() {
 
             msg
         })
-        .build()
+        .connect()
         .to_sync();
-
-    client.connect();
 
     let channel = RealtimeChannelBuilder::new("reverse_encoder")
         .broadcast(BroadcastConfig {

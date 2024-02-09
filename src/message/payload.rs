@@ -65,51 +65,6 @@ impl From<HashMap<String, Value>> for PresenceTrackPayload {
 }
 
 /// Payload for broadcast messages
-/// ```
-/// # use realtime_rs::message::*;  
-/// # use realtime_rs::sync::*;    
-/// # use realtime_rs::*;          
-/// # use realtime_rs::message::payload::*;  
-/// # use std::{collections::HashMap, env};
-/// #
-/// # fn main() -> Result<(), ()> {
-/// #     let url = "http://127.0.0.1:54321";
-/// #     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-/// #
-/// #     let mut client = RealtimeClient::builder(url, anon_key).build();
-/// #
-/// #     let _ = client.connect();
-/// #
-///       // Create channels
-///       let channel_a = client.channel("topic").build(&mut client);
-///       let channel_b = client.channel("topic").build(&mut client);
-///   
-///       let _ = client.block_until_subscribed(channel_a).unwrap();
-///       let _ = client.block_until_subscribed(channel_b).unwrap();
-///   
-///       // Create message
-///       let mut payload = HashMap::new();
-///       payload.insert("message".into(), "hello, multicast!".into());
-///   
-///       let payload = BroadcastPayload::new("target_event", payload);
-///   
-///       // Send message on both channels
-///       let _ = client
-///           .get_channel_mut(channel_a)
-///           .unwrap()
-///           .broadcast(payload.clone());
-///   
-///       let _ = client
-///           .get_channel_mut(channel_b)
-///           .unwrap()
-///           .broadcast(payload);
-/// #
-/// #     match client.next_message() {
-/// #         Ok(_) => Ok(()),
-/// #         Err(NextMessageError::WouldBlock) => Ok(()),
-/// #         Err(_) => Err(()),
-/// #     }
-/// # }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BroadcastPayload {
     pub event: String,

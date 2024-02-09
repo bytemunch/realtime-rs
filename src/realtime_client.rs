@@ -49,12 +49,12 @@ pub enum ConnectError {
     WrongProtocol,
 }
 
-pub enum ClientManagerMessage {
+pub(crate) enum ClientManagerMessage {
     Connect {
         res: Responder<()>,
     },
     Disconnect {
-        res: Responder<()>,
+        res: Responder<RealtimeClientBuilder>,
     },
     GetWsTx {
         res: Responder<UnboundedSender<RealtimeMessage>>,
@@ -78,6 +78,10 @@ pub enum ClientManagerMessage {
     },
 }
 
+/// Manager struct for a [RealtimeClient]
+///
+/// Returned by [RealtimeClientBuilder::connect()]
+// TODO code example showing creation
 #[derive(Clone, Debug)]
 pub struct ClientManager {
     tx: UnboundedSender<ClientManagerMessage>,
@@ -88,36 +92,37 @@ impl ClientManager {
     fn send(&self, message: ClientManagerMessage) -> Result<(), SendError<ClientManagerMessage>> {
         self.tx.send(message)
     }
+    /// Connect to the websocket server
+    // TODO example code
     pub async fn connect(&self) {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::Connect { res: tx });
         rx.await.unwrap()
     }
-    pub async fn disconnect(&self) {
+    /// Disconnect the client
+    /// Returns a preconfigured [RealtimeClientBuilder] for modification or reinstantiation
+    pub async fn disconnect(&self) -> Result<RealtimeClientBuilder, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::Disconnect { res: tx });
-        rx.await.unwrap()
+        rx.await
     }
+    /// Returns the current [ClientState]
     pub async fn get_state(&self) -> Result<ClientState, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::GetState { res: tx });
         rx.await
     }
+    /// Returns an Arc referencing the client's internal tokio runtime
     pub fn get_rt(&self) -> Arc<Runtime> {
         self.rt.clone()
     }
-    pub(crate) async fn get_ws_tx(
-        &self,
-    ) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.send(ClientManagerMessage::GetWsTx { res: tx });
-        rx.await
-    }
+    /// Returns the current access token used by this client
     pub async fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::GetAccessToken { res: tx });
         rx.await
     }
+    /// Returns an Arc<Mutex<String>> referencing the client's access token
     pub async fn get_access_token_arc(
         &self,
     ) -> Result<Arc<Mutex<String>>, oneshot::error::RecvError> {
@@ -125,6 +130,9 @@ impl ClientManager {
         let _ = self.send(ClientManagerMessage::GetAccessTokenArc { res: tx });
         rx.await
     }
+    /// Modify the client's access token
+    /// This change cascades through all connected channels and sends the appropriate messages to
+    /// the server
     pub async fn set_access_token(
         &self,
         access_token: String,
@@ -136,7 +144,11 @@ impl ClientManager {
         });
         rx.await
     }
-    pub async fn add_channel(
+    /// Return a sync wrapper [ClientManagerSync] for this manager
+    pub fn to_sync(self) -> ClientManagerSync {
+        ClientManagerSync { inner: self }
+    }
+    pub(crate) async fn add_channel(
         &self,
         channel_manager: ChannelManager,
     ) -> Result<ChannelManager, oneshot::error::RecvError> {
@@ -147,8 +159,12 @@ impl ClientManager {
         });
         rx.await
     }
-    pub fn to_sync(self) -> ClientManagerSync {
-        ClientManagerSync { inner: self }
+    pub(crate) async fn get_ws_tx(
+        &self,
+    ) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ClientManagerMessage::GetWsTx { res: tx });
+        rx.await
     }
 }
 
@@ -161,24 +177,34 @@ impl ClientManagerSync {
     pub fn get_rt(&self) -> Arc<Runtime> {
         self.inner.rt.clone()
     }
+    /// Connect to the websocket server
+    // TODO example code
     pub fn connect(&self) {
         self.inner.rt.block_on(self.inner.connect());
     }
-    pub fn disconnect(&self) {
-        self.inner.rt.block_on(self.inner.disconnect());
+    /// Disconnect the client
+    /// Returns a preconfigured [RealtimeClientBuilder] for modification or reinstantiation
+    pub fn disconnect(&self) -> Result<RealtimeClientBuilder, oneshot::error::RecvError> {
+        self.inner.rt.block_on(self.inner.disconnect())
     }
     pub fn get_ws_tx(&self) -> Result<UnboundedSender<RealtimeMessage>, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_ws_tx())
     }
+    /// Returns the current [ClientState]
     pub fn get_state(&self) -> Result<ClientState, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_state())
     }
+    /// Returns the current access token used by this client
     pub fn get_access_token(&self) -> Result<String, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_access_token())
     }
+    /// Returns an Arc referencing the client's internal tokio runtime
     pub fn get_access_token_arc(&self) -> Result<Arc<Mutex<String>>, oneshot::error::RecvError> {
         self.inner.rt.block_on(self.inner.get_access_token_arc())
     }
+    /// Modify the client's access token
+    /// This change cascades through all connected channels and sends the appropriate messages to
+    /// the server
     pub fn set_access_token(
         &self,
         access_token: String,
@@ -187,7 +213,11 @@ impl ClientManagerSync {
             .rt
             .block_on(self.inner.set_access_token(access_token))
     }
-    pub fn add_channel(
+    /// Unwrap the inner [ClientManager]. Consumes self.
+    pub fn to_async(self) -> ClientManager {
+        self.inner
+    }
+    pub(crate) fn add_channel(
         &self,
         channel_manager: ChannelManager,
     ) -> Result<ChannelManager, oneshot::error::RecvError> {
@@ -195,14 +225,11 @@ impl ClientManagerSync {
             .rt
             .block_on(self.inner.add_channel(channel_manager))
     }
-    pub fn into_inner(self) -> ClientManager {
-        self.inner
-    }
 }
 
 /// Synchronous websocket client that interfaces with Supabase Realtime
 struct RealtimeClient {
-    pub(crate) access_token: Arc<Mutex<String>>, // TODO wrap with Arc
+    pub(crate) access_token: Arc<Mutex<String>>,
     state: Arc<Mutex<ClientState>>,
     ws_tx: Option<mpsc::UnboundedSender<RealtimeMessage>>,
     channels: Arc<Mutex<Vec<ChannelManager>>>,
@@ -263,8 +290,7 @@ impl RealtimeClient {
                     res.send(self.access_token.clone()).unwrap();
                 }
                 ClientManagerMessage::Disconnect { res } => {
-                    self.disconnect().await;
-                    res.send(()).unwrap();
+                    res.send(self.disconnect().await).unwrap();
                 }
             }
         }
@@ -355,13 +381,27 @@ impl RealtimeClient {
         }
     }
 
-    async fn disconnect(&mut self) {
+    async fn disconnect(&mut self) -> RealtimeClientBuilder {
         self.clear_channels().await;
         self.clear_tasks();
 
         let mut state = self.state.lock().await;
         *state = ClientState::Closed;
         println!("Disconnected!");
+
+        let access_token = self.access_token.lock().await;
+
+        RealtimeClientBuilder {
+            heartbeat_interval: self.heartbeat_interval,
+            params: self.params.clone(),
+            encode: self.encode.clone(),
+            decode: self.decode.clone(),
+            headers: self.headers.clone(),
+            endpoint: self.endpoint.clone(),
+            access_token: access_token.clone(),
+            reconnect_interval: self.reconnect_interval.clone(),
+            reconnect_max_attempts: self.reconnect_max_attempts,
+        }
     }
 
     async fn connect_ws(&mut self) -> Result<(), ConnectError> {
@@ -431,8 +471,7 @@ impl RealtimeClient {
                         }
 
                         let Ok(mut msg) = serde_json::from_str::<RealtimeMessage>(
-                            msg.as_ref().unwrap().to_text().unwrap(), // TODO error handling here,
-                                                                      // disconnect detect
+                            msg.as_ref().unwrap().to_text().unwrap(),
                         ) else {
                             continue;
                         };
@@ -528,6 +567,7 @@ impl RealtimeClient {
 /// Takes a `Box<dyn Fn(usize) -> Duration>`
 /// The provided function should take a count of reconnect attempts and return a [Duration] to wait
 /// until the next attempt is made.
+#[derive(Clone, Debug)]
 pub struct ReconnectFn(pub Box<fn(usize) -> Duration>);
 
 impl ReconnectFn {
@@ -543,28 +583,15 @@ impl Default for ReconnectFn {
 }
 
 /// Builder struct for [RealtimeClient]
-/// ```
-/// # use std::env;
-/// # use realtime_rs::sync::*;
-/// # use realtime_rs::message::*;  
-/// # use realtime_rs::*;          
-/// # fn main() -> Result<(), ()> {
-///     let url = "http://127.0.0.1:54321";
-///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-///
-///     let mut client = RealtimeClientBuilder::new(url, anon_key)
-///         .build();
-/// #   Ok(())
-/// # }
+#[derive(Debug)] // for .unwrap in manager? Hmmge
 pub struct RealtimeClientBuilder {
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
-    encode: Option<Box<Interceptor>>, // TODO interceptor type
+    encode: Option<Box<Interceptor>>,
     decode: Option<Box<Interceptor>>,
     reconnect_interval: ReconnectFn,
     reconnect_max_attempts: usize,
-    auth_url: Option<String>,
     endpoint: String,
     access_token: String,
 }
@@ -583,7 +610,6 @@ impl RealtimeClientBuilder {
             decode: Default::default(),
             reconnect_interval: ReconnectFn(Box::new(backoff)),
             reconnect_max_attempts: usize::MAX,
-            auth_url: Default::default(),
             endpoint: endpoint.into(),
             access_token: anon_key.into(),
         }
@@ -633,29 +659,12 @@ impl RealtimeClientBuilder {
     ///
     /// Defaults to stepped backoff, as shown below
     /// ```
-    /// # use std::env;
     /// # use std::time::Duration;
-    /// # use realtime_rs::sync::*;
-    /// # use realtime_rs::message::*;  
-    /// # use realtime_rs::*;          
-    /// # fn main() -> Result<(), ()> {
-    ///     fn backoff(attempts: usize) -> Duration {
-    ///         let times: Vec<u64> = vec![0, 1, 2, 5, 10];
-    ///         Duration::from_secs(times[attempts.min(times.len() - 1)])
-    ///     }
-    ///
-    ///     let url = "http://127.0.0.1:54321";
-    ///     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
-    ///
-    ///     let mut client = RealtimeClientBuilder::new(url, anon_key)
-    ///         .reconnect_interval(ReconnectFn::new(backoff))
-    ///         .build();
-    /// #   Ok(())
-    /// # }
-    ///
+    ///   fn backoff(attempts: usize) -> Duration {
+    ///       let times: Vec<u64> = vec![0, 1, 2, 5, 10];
+    ///       Duration::from_secs(times[attempts.min(times.len() - 1)])
+    ///   }
     pub fn reconnect_interval(mut self, reconnect_interval: ReconnectFn) -> Self {
-        // TODO minimum interval to prevent 10000000 requests in seconds
-        // then again it takes a bit of work to make that mistake?
         self.reconnect_interval = reconnect_interval;
         self
     }
@@ -666,26 +675,18 @@ impl RealtimeClientBuilder {
         self
     }
 
-    /// Set the base URL for the auth server
-    /// In live supabase deployments this is the same as the endpoint URL, and defaults as such.
-    /// In local deployments this may need to be set manually
-    pub fn auth_url(mut self, auth_url: impl Into<String>) -> Self {
-        self.auth_url = Some(auth_url.into());
-        self
-    }
-
-    pub fn encode(mut self, encode: fn(RealtimeMessage) -> RealtimeMessage) -> Self {
+    pub fn encode(mut self, encode: Interceptor) -> Self {
         self.encode = Some(Box::new(encode));
         self
     }
 
-    pub fn decode(mut self, decode: fn(RealtimeMessage) -> RealtimeMessage) -> Self {
+    pub fn decode(mut self, decode: Interceptor) -> Self {
         self.decode = Some(Box::new(decode));
         self
     }
 
-    /// Consume the [Self] and return a configured [RealtimeClient]
-    pub fn build(self) -> ClientManager {
+    /// Consume the [Self] and return a configured [ClientManager]
+    pub fn connect(self) -> ClientManager {
         let (mgr_tx, mgr_rx) = mpsc::unbounded_channel::<ClientManagerMessage>();
         let tx = mgr_tx.clone();
 
@@ -719,10 +720,10 @@ impl RealtimeClientBuilder {
             rt: rt.clone(),
         };
 
-        let _handle = rt.spawn(async move { client.manager_recv().await });
-
-        // TODO connect on build
-        // TODO disconnect returns a preconfigured builder?
+        let _handle = rt.spawn(async move {
+            client.connect().await.unwrap();
+            client.manager_recv().await;
+        });
 
         manager
     }

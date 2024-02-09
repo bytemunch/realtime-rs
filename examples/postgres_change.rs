@@ -33,10 +33,8 @@ fn main() {
 
     let client = RealtimeClientBuilder::new(url, anon_key)
         .access_token(session.access_token)
-        .build()
+        .connect()
         .to_sync();
-
-    client.connect();
 
     let rc = Arc::clone(&event_counter);
 

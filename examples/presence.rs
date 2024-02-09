@@ -10,9 +10,9 @@ fn main() {
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
-    let client = RealtimeClientBuilder::new(url, anon_key).build().to_sync();
-
-    client.connect();
+    let client = RealtimeClientBuilder::new(url, anon_key)
+        .connect()
+        .to_sync();
 
     let mut presence_payload = HashMap::new();
     presence_payload.insert("kb_layout".into(), "en_US".into());

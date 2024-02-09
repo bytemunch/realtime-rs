@@ -54,7 +54,7 @@ pub enum ChannelSendError {
     ChannelError(ChannelState),
 }
 
-pub enum ChannelManagerMessage {
+pub(crate) enum ChannelManagerMessage {
     Subscribe,
     Unsubscribe {
         res: Responder<Result<ChannelState, ChannelSendError>>,
@@ -93,6 +93,10 @@ pub enum ChannelManagerMessage {
     },
 }
 
+/// Manager struct for a [RealtimeChannel]
+///
+/// Returned by [RealtimeChannelBuilder::build()]
+// TODO code example showing creation
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
     pub(crate) tx: UnboundedSender<ChannelManagerMessage>,
@@ -100,65 +104,78 @@ pub struct ChannelManager {
 }
 
 impl ChannelManager {
-    pub fn send(
-        &self,
-        message: ChannelManagerMessage,
-    ) -> Result<(), SendError<ChannelManagerMessage>> {
-        self.tx.send(message)
-    }
+    /// Send a JoinMessage for the channel
     pub fn subscribe(&self) {
         let _ = self.send(ChannelManagerMessage::Subscribe);
     }
+    /// Leave the channel and stop recieving messages
+    ///
+    /// Once unsubscribed this manager is useless and should be dropped
+    // TODO return a preconfigured ChannelBuilder here, like client does?
     pub async fn unsubscribe(&self) -> Result<Result<ChannelState, ChannelSendError>, RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::Unsubscribe { res: tx });
         rx.await
     }
+    /// Send a JoinMessage for the channel and wait until the server has responded
     pub async fn subscribe_blocking(&self) -> Result<(), oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::SubscribeBlocking { res: tx });
         rx.await
     }
+    /// Send a broadcast message on the channel
     pub fn broadcast(&self, payload: BroadcastPayload) {
         let _ = self.send(ChannelManagerMessage::Broadcast { payload });
     }
+    /// Track data in Presence
     pub async fn track(&self, payload: HashMap<String, Value>) -> Result<(), RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::PresenceTrack { payload, res: tx });
         rx.await
     }
+    /// Stop tracking with Presence
     pub async fn untrack(&self) -> Result<(), RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::PresenceUntrack { res: tx });
         rx.await
     }
-    pub async fn reauth(&self) -> Result<(), RecvError> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.send(ChannelManagerMessage::ReAuth { res: tx });
-        rx.await
-    }
+    /// Returns the [ChannelState] for the associated channel
     pub async fn get_state(&self) -> Result<ChannelState, RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::GetState { res: tx });
         rx.await
     }
+    /// Returns the associated channel's topic
     pub async fn get_topic(&self) -> String {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::GetTopic { res: tx });
         rx.await.unwrap()
     }
-    pub async fn get_tx(&self) -> UnboundedSender<RealtimeMessage> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.send(ChannelManagerMessage::GetTx { res: tx });
-        rx.await.unwrap()
-    }
+    /// Returns the current [PresenceState] of the associated channel
     pub async fn get_presence_state(&self) -> PresenceState {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ChannelManagerMessage::GetPresenceState { res: tx });
         rx.await.unwrap()
     }
+    /// Return a sync wrapper [ChannelManagerSync] for this manager
     pub fn to_sync(self) -> ChannelManagerSync {
         ChannelManagerSync { inner: self }
+    }
+    pub(crate) fn send(
+        &self,
+        message: ChannelManagerMessage,
+    ) -> Result<(), SendError<ChannelManagerMessage>> {
+        self.tx.send(message)
+    }
+    pub(crate) async fn reauth(&self) -> Result<(), RecvError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::ReAuth { res: tx });
+        rx.await
+    }
+    pub(crate) async fn get_tx(&self) -> UnboundedSender<RealtimeMessage> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.send(ChannelManagerMessage::GetTx { res: tx });
+        rx.await.unwrap()
     }
 }
 
@@ -168,12 +185,6 @@ pub struct ChannelManagerSync {
 }
 
 impl ChannelManagerSync {
-    pub fn get_rt(&self) -> Arc<Runtime> {
-        self.inner.rt.clone()
-    }
-    pub fn into_inner(self) -> ChannelManager {
-        self.inner
-    }
     pub fn subscribe(&self) {
         self.inner.subscribe()
     }
@@ -186,9 +197,14 @@ impl ChannelManagerSync {
     pub fn broadcast(&self, payload: BroadcastPayload) {
         self.inner.broadcast(payload)
     }
+    /// Returns the associated channel's topic
+    pub fn get_topic(&self) -> String {
+        self.inner.rt.block_on(self.inner.get_topic())
+    }
     pub fn get_state(&self) -> Result<ChannelState, RecvError> {
         self.inner.rt.block_on(self.inner.get_state())
     }
+    /// Returns the current [PresenceState] of the associated channel
     pub fn get_presence_state(&self) -> PresenceState {
         self.inner.rt.block_on(self.inner.get_presence_state())
     }
@@ -198,8 +214,9 @@ impl ChannelManagerSync {
     pub fn untrack(&self) -> Result<(), RecvError> {
         self.inner.rt.block_on(self.inner.untrack())
     }
-    pub fn reauth(&self) -> Result<(), RecvError> {
-        self.inner.rt.block_on(self.inner.reauth())
+    /// Unwrap the inner [ChannelManager]. Consumes self.
+    pub fn to_async(self) -> ChannelManager {
+        self.inner
     }
 }
 
@@ -213,7 +230,6 @@ impl<'a> FromIterator<&'a mut ChannelManager> for Vec<ChannelManager> {
     }
 }
 
-/// Channel structure
 struct RealtimeChannel {
     pub(crate) topic: String,
     pub(crate) state: Arc<Mutex<ChannelState>>,
@@ -493,8 +509,6 @@ impl RealtimeChannel {
 }
 
 /// Builder struct for [RealtimeChannel]
-///
-/// Get access to this through [RealtimeClient::channel()]
 pub struct RealtimeChannelBuilder {
     topic: String,
     broadcast: BroadcastConfig,
@@ -507,6 +521,8 @@ pub struct RealtimeChannelBuilder {
 }
 
 impl RealtimeChannelBuilder {
+    /// Create a new channel builder
+    // TODO example code
     pub fn new(topic: impl Into<String>) -> Self {
         Self {
             topic: format!("realtime:{}", topic.into()),
@@ -539,8 +555,6 @@ impl RealtimeChannelBuilder {
     }
 
     /// Add a postgres changes callback to this channel
-    ///```
-    /// TODO code
     pub fn on_postgres_change(
         mut self,
         event: PostgresChangesEvent,
@@ -567,12 +581,9 @@ impl RealtimeChannelBuilder {
     }
 
     /// Add a presence callback to this channel
-    ///```
-    /// TODO code
     pub fn on_presence(
         mut self,
         event: PresenceEvent,
-        // TODO callback type alias
         callback: impl Fn(String, PresenceState, PresenceState) + Send + 'static,
     ) -> Self {
         if self.presence_callbacks.get_mut(&event).is_none() {
@@ -588,8 +599,6 @@ impl RealtimeChannelBuilder {
     }
 
     /// Add a broadcast callback to this channel
-    /// ```
-    /// TODO code
     pub fn on_broadcast(
         mut self,
         event: impl Into<String>,
@@ -654,6 +663,12 @@ impl RealtimeChannelBuilder {
         ChannelManager { tx, rt }
     }
 
+    // TODO unify the builds using a clientmanager trait. Need async-trait
+
+    /// Consume self and return a new [ChannelManagerSync] that controls the newly created channel
+    /// Automatically assigns the new channel in the client.
+    ///
+    /// For async applications you may want `self::build()`
     pub fn build_sync(self, client: &ClientManagerSync) -> Result<ChannelManagerSync, RecvError> {
         let client_tx = client.clone().get_ws_tx().unwrap();
         let access_token = client.clone().get_access_token().unwrap();
@@ -667,6 +682,10 @@ impl RealtimeChannelBuilder {
         Ok(channel_manager.to_sync())
     }
 
+    /// Consume self and return a new [ChannelManager] that controls the newly created channel
+    /// Automatically assigns the new channel in the client.
+    ///
+    /// For sync applications you may want `self::build_sync()`
     pub async fn build(self, client: &ClientManager) -> Result<ChannelManager, RecvError> {
         let client_tx = client.clone().get_ws_tx().await?;
         let access_token = client.clone().get_access_token().await?;

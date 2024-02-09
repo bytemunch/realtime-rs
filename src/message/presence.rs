@@ -38,7 +38,7 @@ pub struct PresenceState(pub PresenceStateInner);
 
 impl PresenceState {
     /// Returns a once flattened map of presence data:
-    /// HashMap<phx_ref, <key, value>>
+    /// HashMap<phx_ref, Hashmap<key, value>>
     pub fn get_phx_map(&self) -> PhxMap {
         let mut new_map = HashMap::new();
         for (_id, map) in self.0.clone() {

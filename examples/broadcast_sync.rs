@@ -11,10 +11,8 @@ fn main() {
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)
         .heartbeat_interval(Duration::from_secs(29))
-        .build()
+        .connect()
         .to_sync();
-
-    client.connect();
 
     let channel = RealtimeChannelBuilder::new("TestTopic")
         .broadcast(BroadcastConfig {
