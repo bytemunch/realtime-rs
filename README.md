@@ -5,6 +5,7 @@ Async + sync websocket client wrappers for Supabase realtime.
 ## Installation
 
 Crate coming soon, unofficial for now :)
+
 ## Usage
 
 ### Sync API
