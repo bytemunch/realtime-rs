@@ -4,8 +4,7 @@ Async + sync websocket client wrappers for Supabase realtime.
 
 ## Installation
 
-
-
+Crate coming soon, unofficial for now :)
 ## Usage
 
 ### Sync API
@@ -25,10 +24,8 @@ fn main() {
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)
         .heartbeat_interval(Duration::from_secs(29))
-        .build()
+        .connect()
         .to_sync();
-
-    client.connect();
 
     let channel = RealtimeChannelBuilder::new("TestTopic")
         .broadcast(BroadcastConfig {
@@ -81,9 +78,7 @@ async fn main() {
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)
         .heartbeat_interval(Duration::from_secs(29))
-        .build();
-
-    client.connect().await;
+        .connect();
 
     let channel = RealtimeChannelBuilder::new("TestTopic")
         .broadcast(BroadcastConfig {
@@ -124,13 +119,12 @@ See `/examples` for more!
 ## TODOs
 
  - [ ] Connection timeouts
- - [ ] Documentation + Doctestable examples
+ - [ ] Doctestable examples
  - [ ] Custom middlewarey message mutating functions
  - [ ] REST channel sending
  - [ ] Remove unused `derive`s
     > means implementing a bunch of `Serialize` and `Deserialize` traits by hand.. busywork
  - [ ] Throttling
- - [ ] Auth: Test cascading access_token update
 
  #### Examples
 
