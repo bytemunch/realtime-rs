@@ -13,7 +13,6 @@ keywords = ["realtime", "supabase", "database", "cdc"]
 categories = ["database"]
 
 [dependencies]
-futures-channel = "0.3.30"
 futures-util = "0.3.30"
 native-tls = "0.2.11"
 regex = "1.10.3"
@@ -26,4 +25,4 @@ url = "2.5.0"
 uuid = { version = "1.6.1", features = ["fast-rng", "v4"] }
 
 [dev-dependencies]
-go_true = {version = "0.1.1"}
+go_true = {git = "https://github.com/bytemunch/go_true.git", branch = "provider_signin"}

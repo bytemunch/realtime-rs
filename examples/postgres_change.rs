@@ -15,21 +15,23 @@ fn main() {
 
     let event_counter = Arc::new(Mutex::new(0));
 
-    let mut gotrue = go_true::Client::new("http://192.168.64.5:9999".to_string());
+    let mut gotrue = go_true::Api::new("http://172.27.0.4:9999".to_string());
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
 
-    let Ok(session) = rt.block_on({
-        gotrue.sign_in(
-            go_true::EmailOrPhone::Email("test@example.com".into()),
-            &String::from("password"),
-        )
-    }) else {
-        return println!("Auth broke");
+    let session = match rt.block_on(async {
+        let url = gotrue.get_url_for_provider("google");
+        println!("Go here to log in:\n{url}");
+        gotrue.provider_sign_in().await
+    }) {
+        Ok(s) => s,
+        Err(e) => return println!("AuthError: {}", e),
     };
+
+    println!("Login success!");
 
     let client = RealtimeClientBuilder::new(url, anon_key)
         .access_token(session.access_token)

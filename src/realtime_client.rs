@@ -16,7 +16,9 @@ use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue, Request, Uri}
 use futures_util::{pin_mut, StreamExt};
 
 use crate::message::RealtimeMessage;
-use crate::realtime_channel::{ChannelManager, ChannelManagerMessage, ChannelState};
+use crate::realtime_channel::{
+    ChannelManager, ChannelManagerMessage, ChannelState, RealtimeChannelBuilder,
+};
 use crate::Responder;
 
 pub type Interceptor = fn(RealtimeMessage) -> RealtimeMessage;
@@ -148,6 +150,9 @@ impl ClientManager {
     pub fn to_sync(self) -> ClientManagerSync {
         ClientManagerSync { inner: self }
     }
+    pub fn channel(&self, topic: impl Into<String>) -> RealtimeChannelBuilder {
+        RealtimeChannelBuilder::new(topic)
+    }
     pub(crate) async fn add_channel(
         &self,
         channel_manager: ChannelManager,
@@ -176,6 +181,9 @@ pub struct ClientManagerSync {
 impl ClientManagerSync {
     pub fn get_rt(&self) -> Arc<Runtime> {
         self.inner.rt.clone()
+    }
+    pub fn channel(&self, topic: impl Into<String>) -> RealtimeChannelBuilder {
+        self.inner.channel(topic)
     }
     /// Connect to the websocket server
     // TODO example code
@@ -230,6 +238,7 @@ impl ClientManagerSync {
 /// Synchronous websocket client that interfaces with Supabase Realtime
 struct RealtimeClient {
     pub(crate) access_token: Arc<Mutex<String>>,
+    anon_key: String,
     state: Arc<Mutex<ClientState>>,
     ws_tx: Option<mpsc::UnboundedSender<RealtimeMessage>>,
     channels: Arc<Mutex<Vec<ChannelManager>>>,
@@ -307,7 +316,7 @@ impl RealtimeClient {
         let token = self.access_token.lock().await;
         let uri: Uri = match format!(
             "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
-            self.endpoint, *token
+            self.endpoint, self.anon_key
         )
         .parse()
         {
@@ -352,6 +361,11 @@ impl RealtimeClient {
 
         let headers = request.headers_mut();
 
+        let apikey: HeaderValue = format!("{}", self.anon_key)
+            .parse()
+            .expect("malformed access token?");
+        headers.insert("Authorization", apikey);
+
         let auth: HeaderValue = format!("Bearer {}", *token)
             .parse()
             .expect("malformed access token?");
@@ -392,6 +406,7 @@ impl RealtimeClient {
         let access_token = self.access_token.lock().await;
 
         RealtimeClientBuilder {
+            anon_key: self.anon_key.clone(),
             heartbeat_interval: self.heartbeat_interval,
             params: self.params.clone(),
             encode: self.encode.clone(),
@@ -415,20 +430,24 @@ impl RealtimeClient {
         loop {
             let (ws_tx_tx, ws_tx_rx) = mpsc::unbounded_channel();
 
-            let Ok((ws_stream, _res)) = connect_async(request.clone()).await else {
+            let conn = connect_async(request.clone()).await;
+
+            if let Err(e) = conn {
+                println!("Connection failed: {}", e);
                 reconnect_attempts += 1;
                 if reconnect_attempts >= self.reconnect_max_attempts {
                     println!(
-                        "Connection failed, max retries exceeded ({}/{})",
+                        "Max retries exceeded ({}/{})",
                         reconnect_attempts, self.reconnect_max_attempts
                     );
                     return Err(ConnectError::MaxRetries);
                 }
-                println!(
-                    "Connection failed. Retrying (attempt #{})",
-                    reconnect_attempts
-                );
+                println!("Retrying (attempt #{})", reconnect_attempts);
                 sleep(self.reconnect_interval.0(reconnect_attempts)).await;
+                continue;
+            }
+
+            let Ok((ws_stream, _res)) = conn else {
                 continue;
             };
 
@@ -585,6 +604,7 @@ impl Default for ReconnectFn {
 /// Builder struct for [RealtimeClient]
 #[derive(Debug)] // for .unwrap in manager? Hmmge
 pub struct RealtimeClientBuilder {
+    anon_key: String,
     headers: HeaderMap,
     params: Option<HashMap<String, String>>,
     heartbeat_interval: Duration,
@@ -602,7 +622,10 @@ impl RealtimeClientBuilder {
         let mut headers = HeaderMap::new();
         headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
 
+        let anon_key: String = anon_key.into();
+
         Self {
+            anon_key: anon_key.clone(),
             headers,
             params: Default::default(),
             heartbeat_interval: Duration::from_secs(29),
@@ -611,7 +634,7 @@ impl RealtimeClientBuilder {
             reconnect_interval: ReconnectFn(Box::new(backoff)),
             reconnect_max_attempts: usize::MAX,
             endpoint: endpoint.into(),
-            access_token: anon_key.into(),
+            access_token: anon_key,
         }
     }
 
@@ -702,6 +725,7 @@ impl RealtimeClientBuilder {
         let manager = ClientManager { tx, rt: rt.clone() };
 
         let mut client = RealtimeClient {
+            anon_key: self.anon_key,
             headers: self.headers,
             params: self.params,
             heartbeat_interval: self.heartbeat_interval,
