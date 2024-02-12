@@ -310,6 +310,7 @@ checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
 [[package]]
 name = "go_true"
 version = "0.1.1"
+source = "git+https://github.com/bytemunch/gotrue-rs.git?branch=provider-signin#9d07ece950ba11f0988ab0e0d49bf5f193b9dab6"
 dependencies = [
  "reqwest",
  "serde",

@@ -25,4 +25,4 @@ url = "2.5.0"
 uuid = { version = "1.6.1", features = ["fast-rng", "v4"] }
 
 [dev-dependencies]
-go_true = {git = "https://github.com/bytemunch/go_true.git", branch = "provider_signin"}
+go_true = {git = "https://github.com/bytemunch/gotrue-rs.git", branch = "provider-signin"}
