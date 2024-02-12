@@ -73,7 +73,7 @@ impl RealtimePresence {
                 .get_mut(&PresenceEvent::Sync)
                 .unwrap_or(&mut vec![])
             {
-                cb.as_mut()(id.clone(), prev_state.clone(), self.state.clone());
+                cb.0(id.clone(), prev_state.clone(), self.state.clone());
             }
         }
     }
@@ -89,7 +89,7 @@ impl RealtimePresence {
                 .get_mut(&PresenceEvent::Join)
                 .unwrap_or(&mut vec![])
             {
-                cb.as_mut()(id.clone(), self.state.clone(), diff.clone().joins);
+                cb.0(id.clone(), self.state.clone(), diff.clone().joins);
             }
         }
 
@@ -99,7 +99,7 @@ impl RealtimePresence {
                 .get_mut(&PresenceEvent::Leave)
                 .unwrap_or(&mut vec![])
             {
-                cb.as_mut()(id.clone(), self.state.clone(), diff.clone().leaves);
+                cb.0(id.clone(), self.state.clone(), diff.clone().leaves);
             }
 
             self.state.0.remove(&id);

@@ -602,7 +602,7 @@ impl Default for ReconnectFn {
 }
 
 /// Builder struct for [RealtimeClient]
-#[derive(Debug)] // for .unwrap in manager? Hmmge
+#[derive(Debug, Clone)]
 pub struct RealtimeClientBuilder {
     anon_key: String,
     headers: HeaderMap,

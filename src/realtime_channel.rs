@@ -29,12 +29,19 @@ use crate::message::{
 use std::fmt::Debug;
 use std::{collections::HashMap, sync::Arc};
 
-type CdcCallback = (
+#[derive(Clone)]
+struct CdcCallback(
     PostgresChangeFilter,
-    Box<dyn FnMut(&PostgresChangesPayload) + Send>,
+    Arc<dyn Fn(&PostgresChangesPayload) + Send + Sync>,
 );
-type BroadcastCallback = Box<dyn FnMut(&HashMap<String, Value>) + Send>;
-pub(crate) type PresenceCallback = Box<dyn Fn(String, PresenceState, PresenceState) + Send>;
+
+#[derive(Clone)]
+struct BroadcastCallback(Arc<dyn Fn(&HashMap<String, Value>) + Send + Sync>);
+
+#[derive(Clone)]
+pub(crate) struct PresenceCallback(
+    pub Arc<dyn Fn(String, PresenceState, PresenceState) + Send + Sync>,
+);
 
 /// Channel states
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -349,7 +356,7 @@ impl RealtimeChannel {
                     Payload::Broadcast(payload) => {
                         if let Some(cb_vec) = broadcast_callbacks.get_mut(&payload.event) {
                             for cb in cb_vec {
-                                cb(&payload.payload);
+                                cb.0(&payload.payload);
                             }
                         }
                     }
@@ -509,6 +516,7 @@ impl RealtimeChannel {
 }
 
 /// Builder struct for [RealtimeChannel]
+#[derive(Clone)]
 pub struct RealtimeChannelBuilder {
     topic: String,
     broadcast: BroadcastConfig,
@@ -559,7 +567,7 @@ impl RealtimeChannelBuilder {
         mut self,
         event: PostgresChangesEvent,
         filter: PostgresChangeFilter,
-        callback: impl FnMut(&PostgresChangesPayload) + 'static + Send,
+        callback: impl Fn(&PostgresChangesPayload) + 'static + Send + Sync,
     ) -> Self {
         self.postgres_changes.push(PostgresChange {
             event: event.clone(),
@@ -575,7 +583,7 @@ impl RealtimeChannelBuilder {
         self.cdc_callbacks
             .get_mut(&event)
             .unwrap_or(&mut vec![])
-            .push((filter, Box::new(callback)));
+            .push(CdcCallback(filter, Arc::new(callback)));
 
         self
     }
@@ -584,7 +592,7 @@ impl RealtimeChannelBuilder {
     pub fn on_presence(
         mut self,
         event: PresenceEvent,
-        callback: impl Fn(String, PresenceState, PresenceState) + Send + 'static,
+        callback: impl Fn(String, PresenceState, PresenceState) + Send + 'static + Sync,
     ) -> Self {
         if self.presence_callbacks.get_mut(&event).is_none() {
             self.presence_callbacks.insert(event.clone(), vec![]);
@@ -593,7 +601,7 @@ impl RealtimeChannelBuilder {
         self.presence_callbacks
             .get_mut(&event)
             .unwrap_or(&mut vec![])
-            .push(Box::new(callback));
+            .push(PresenceCallback(Arc::new(callback)));
 
         self
     }
@@ -602,7 +610,7 @@ impl RealtimeChannelBuilder {
     pub fn on_broadcast(
         mut self,
         event: impl Into<String>,
-        callback: impl FnMut(&HashMap<String, Value>) + 'static + Send,
+        callback: impl Fn(&HashMap<String, Value>) + Sync + Send + 'static,
     ) -> Self {
         let event: String = event.into();
 
@@ -613,7 +621,7 @@ impl RealtimeChannelBuilder {
         self.broadcast_callbacks
             .get_mut(&event)
             .unwrap_or(&mut vec![])
-            .push(Box::new(callback));
+            .push(BroadcastCallback(Arc::new(callback)));
 
         self
     }
@@ -627,7 +635,7 @@ impl RealtimeChannelBuilder {
     ) -> ChannelManager {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
         let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
-        let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks));
+        let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks.clone()));
         let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelManagerMessage>();
 
         let mut channel = RealtimeChannel {

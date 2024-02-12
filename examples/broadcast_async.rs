@@ -9,7 +9,7 @@ use tokio::time::sleep;
 #[tokio::main]
 async fn main() {
     let endpoint = "http://127.0.0.1:54321";
-    let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
+    let access_token = std::env::var("SUPABASE_LOCAL_ANON_KEY").unwrap();
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)
         .heartbeat_interval(Duration::from_secs(29))
