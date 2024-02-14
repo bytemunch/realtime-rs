@@ -638,14 +638,14 @@ impl RealtimeClientBuilder {
         }
     }
 
-    pub fn access_token(mut self, access_token: impl Into<String>) -> Self {
+    pub fn access_token(&mut self, access_token: impl Into<String>) -> &mut Self {
         self.access_token = access_token.into();
 
         self
     }
 
     /// Sets the client headers. Headers always contain "X-Client-Info: realtime-rs/{version}".
-    pub fn set_headers(mut self, set_headers: HeaderMap) -> Self {
+    pub fn set_headers(&mut self, set_headers: HeaderMap) -> &mut Self {
         let mut headers = HeaderMap::new();
         headers.insert("X-Client-Info", "realtime-rs/0.1.0".parse().unwrap());
         headers.extend(set_headers);
@@ -656,19 +656,19 @@ impl RealtimeClientBuilder {
     }
 
     /// Merges provided [HeaderMap] with currently held headers
-    pub fn add_headers(mut self, headers: HeaderMap) -> Self {
+    pub fn add_headers(&mut self, headers: HeaderMap) -> &mut Self {
         self.headers.extend(headers);
         self
     }
 
     /// Set endpoint URL params
-    pub fn params(mut self, params: HashMap<String, String>) -> Self {
+    pub fn params(&mut self, params: HashMap<String, String>) -> &mut Self {
         self.params = Some(params);
         self
     }
 
     /// Set [Duration] between heartbeat packets. Default 29 seconds.
-    pub fn heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+    pub fn heartbeat_interval(&mut self, heartbeat_interval: Duration) -> &mut Self {
         self.heartbeat_interval = heartbeat_interval;
         self
     }
@@ -687,29 +687,29 @@ impl RealtimeClientBuilder {
     ///       let times: Vec<u64> = vec![0, 1, 2, 5, 10];
     ///       Duration::from_secs(times[attempts.min(times.len() - 1)])
     ///   }
-    pub fn reconnect_interval(mut self, reconnect_interval: ReconnectFn) -> Self {
+    pub fn reconnect_interval(&mut self, reconnect_interval: ReconnectFn) -> &mut Self {
         self.reconnect_interval = reconnect_interval;
         self
     }
 
     /// Configure the number of recconect attempts to be made before erroring
-    pub fn reconnect_max_attempts(mut self, max_attempts: usize) -> Self {
+    pub fn reconnect_max_attempts(&mut self, max_attempts: usize) -> &mut Self {
         self.reconnect_max_attempts = max_attempts;
         self
     }
 
-    pub fn encode(mut self, encode: Interceptor) -> Self {
+    pub fn encode(&mut self, encode: Interceptor) -> &mut Self {
         self.encode = Some(Box::new(encode));
         self
     }
 
-    pub fn decode(mut self, decode: Interceptor) -> Self {
+    pub fn decode(&mut self, decode: Interceptor) -> &mut Self {
         self.decode = Some(Box::new(decode));
         self
     }
 
     /// Consume the [Self] and return a configured [ClientManager]
-    pub fn connect(self) -> ClientManager {
+    pub fn connect(&mut self) -> ClientManager {
         let (mgr_tx, mgr_rx) = mpsc::unbounded_channel::<ClientManagerMessage>();
         let tx = mgr_tx.clone();
 
@@ -725,16 +725,16 @@ impl RealtimeClientBuilder {
         let manager = ClientManager { tx, rt: rt.clone() };
 
         let mut client = RealtimeClient {
-            anon_key: self.anon_key,
-            headers: self.headers,
-            params: self.params,
+            anon_key: self.anon_key.clone(),
+            headers: self.headers.clone(),
+            params: self.params.clone(),
             heartbeat_interval: self.heartbeat_interval,
-            encode: self.encode,
-            decode: self.decode,
-            reconnect_interval: self.reconnect_interval,
+            encode: self.encode.clone(),
+            decode: self.decode.clone(),
+            reconnect_interval: self.reconnect_interval.clone(),
             reconnect_max_attempts: self.reconnect_max_attempts,
-            endpoint: self.endpoint,
-            access_token: Arc::new(Mutex::new(self.access_token)),
+            endpoint: self.endpoint.clone(),
+            access_token: Arc::new(Mutex::new(self.access_token.clone())),
             state: Arc::new(Mutex::new(ClientState::Closed)),
             ws_tx: None,
             channels: Arc::new(Mutex::new(Vec::new())),

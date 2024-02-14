@@ -545,30 +545,30 @@ impl RealtimeChannelBuilder {
     }
 
     /// Set the topic of the channel
-    pub fn topic(mut self, topic: impl Into<String>) -> Self {
+    pub fn topic(&mut self, topic: impl Into<String>) -> &mut Self {
         self.topic = format!("realtime:{}", topic.into());
         self
     }
 
     /// Set the broadcast config for this channel
-    pub fn broadcast(mut self, broadcast_config: BroadcastConfig) -> Self {
+    pub fn broadcast(&mut self, broadcast_config: BroadcastConfig) -> &mut Self {
         self.broadcast = broadcast_config;
         self
     }
 
     /// Set the presence config for this channel
-    pub fn presence(mut self, presence_config: PresenceConfig) -> Self {
+    pub fn presence(&mut self, presence_config: PresenceConfig) -> &mut Self {
         self.presence = presence_config;
         self
     }
 
     /// Add a postgres changes callback to this channel
     pub fn on_postgres_change(
-        mut self,
+        &mut self,
         event: PostgresChangesEvent,
         filter: PostgresChangeFilter,
         callback: impl Fn(&PostgresChangesPayload) + 'static + Send + Sync,
-    ) -> Self {
+    ) -> &mut Self {
         self.postgres_changes.push(PostgresChange {
             event: event.clone(),
             schema: filter.schema.clone(),
@@ -590,10 +590,10 @@ impl RealtimeChannelBuilder {
 
     /// Add a presence callback to this channel
     pub fn on_presence(
-        mut self,
+        &mut self,
         event: PresenceEvent,
         callback: impl Fn(String, PresenceState, PresenceState) + Send + 'static + Sync,
-    ) -> Self {
+    ) -> &mut Self {
         if self.presence_callbacks.get_mut(&event).is_none() {
             self.presence_callbacks.insert(event.clone(), vec![]);
         }
@@ -608,10 +608,10 @@ impl RealtimeChannelBuilder {
 
     /// Add a broadcast callback to this channel
     pub fn on_broadcast(
-        mut self,
+        &mut self,
         event: impl Into<String>,
         callback: impl Fn(&HashMap<String, Value>) + Sync + Send + 'static,
-    ) -> Self {
+    ) -> &mut Self {
         let event: String = event.into();
 
         if self.broadcast_callbacks.get_mut(&event).is_none() {
@@ -627,14 +627,14 @@ impl RealtimeChannelBuilder {
     }
 
     fn build_common(
-        self,
+        &mut self,
         client_tx: UnboundedSender<RealtimeMessage>,
         access_token: String,
         access_token_arc: Arc<Mutex<String>>,
         rt: Arc<Runtime>,
     ) -> ChannelManager {
         let state = Arc::new(Mutex::new(ChannelState::Closed));
-        let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks));
+        let cdc_callbacks = Arc::new(Mutex::new(self.cdc_callbacks.clone()));
         let broadcast_callbacks = Arc::new(Mutex::new(self.broadcast_callbacks.clone()));
         let (controller_tx, controller_rx) = mpsc::unbounded_channel::<ChannelManagerMessage>();
 
@@ -642,7 +642,7 @@ impl RealtimeChannelBuilder {
             access_token: access_token_arc,
             rt: rt.clone(),
             tx: None,
-            topic: self.topic,
+            topic: self.topic.clone(),
             cdc_callbacks,
             broadcast_callbacks,
             client_tx,
@@ -650,14 +650,14 @@ impl RealtimeChannelBuilder {
             id: self.id,
             join_payload: JoinPayload {
                 config: JoinConfig {
-                    broadcast: self.broadcast,
-                    presence: self.presence,
-                    postgres_changes: self.postgres_changes,
+                    broadcast: self.broadcast.clone(),
+                    presence: self.presence.clone(),
+                    postgres_changes: self.postgres_changes.clone(),
                 },
                 access_token,
             },
             presence: Arc::new(Mutex::new(RealtimePresence::from_channel_builder(
-                self.presence_callbacks,
+                self.presence_callbacks.clone(),
             ))),
             manager_channel: (controller_tx, controller_rx),
             message_handle: None,
@@ -677,7 +677,10 @@ impl RealtimeChannelBuilder {
     /// Automatically assigns the new channel in the client.
     ///
     /// For async applications you may want `self::build()`
-    pub fn build_sync(self, client: &ClientManagerSync) -> Result<ChannelManagerSync, RecvError> {
+    pub fn build_sync(
+        &mut self,
+        client: &ClientManagerSync,
+    ) -> Result<ChannelManagerSync, RecvError> {
         let client_tx = client.clone().get_ws_tx().unwrap();
         let access_token = client.clone().get_access_token().unwrap();
         let access_token_arc = client.clone().get_access_token_arc().unwrap();
@@ -694,7 +697,7 @@ impl RealtimeChannelBuilder {
     /// Automatically assigns the new channel in the client.
     ///
     /// For sync applications you may want `self::build_sync()`
-    pub async fn build(self, client: &ClientManager) -> Result<ChannelManager, RecvError> {
+    pub async fn build(&mut self, client: &ClientManager) -> Result<ChannelManager, RecvError> {
         let client_tx = client.clone().get_ws_tx().await?;
         let access_token = client.clone().get_access_token().await?;
         let access_token_arc = client.clone().get_access_token_arc().await?;
