@@ -10,12 +10,12 @@ fn main() {
     let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)
-        .heartbeat_interval(Duration::from_secs(29))
+        .set_heartbeat_interval(Duration::from_secs(29))
         .connect()
         .to_sync();
 
     let channel = RealtimeChannelBuilder::new("TestTopic")
-        .broadcast(BroadcastConfig {
+        .set_broadcast_config(BroadcastConfig {
             broadcast_self: true,
             ack: false,
         })

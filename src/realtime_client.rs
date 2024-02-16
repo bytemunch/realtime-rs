@@ -638,7 +638,7 @@ impl RealtimeClientBuilder {
         }
     }
 
-    pub fn access_token(&mut self, access_token: impl Into<String>) -> &mut Self {
+    pub fn set_access_token(&mut self, access_token: impl Into<String>) -> &mut Self {
         self.access_token = access_token.into();
 
         self
@@ -662,13 +662,13 @@ impl RealtimeClientBuilder {
     }
 
     /// Set endpoint URL params
-    pub fn params(&mut self, params: HashMap<String, String>) -> &mut Self {
+    pub fn set_params(&mut self, params: HashMap<String, String>) -> &mut Self {
         self.params = Some(params);
         self
     }
 
     /// Set [Duration] between heartbeat packets. Default 29 seconds.
-    pub fn heartbeat_interval(&mut self, heartbeat_interval: Duration) -> &mut Self {
+    pub fn set_heartbeat_interval(&mut self, heartbeat_interval: Duration) -> &mut Self {
         self.heartbeat_interval = heartbeat_interval;
         self
     }
@@ -687,23 +687,23 @@ impl RealtimeClientBuilder {
     ///       let times: Vec<u64> = vec![0, 1, 2, 5, 10];
     ///       Duration::from_secs(times[attempts.min(times.len() - 1)])
     ///   }
-    pub fn reconnect_interval(&mut self, reconnect_interval: ReconnectFn) -> &mut Self {
+    pub fn set_reconnect_interval(&mut self, reconnect_interval: ReconnectFn) -> &mut Self {
         self.reconnect_interval = reconnect_interval;
         self
     }
 
     /// Configure the number of recconect attempts to be made before erroring
-    pub fn reconnect_max_attempts(&mut self, max_attempts: usize) -> &mut Self {
+    pub fn set_reconnect_max_attempts(&mut self, max_attempts: usize) -> &mut Self {
         self.reconnect_max_attempts = max_attempts;
         self
     }
 
-    pub fn encode(&mut self, encode: Interceptor) -> &mut Self {
+    pub fn set_encoder(&mut self, encode: Interceptor) -> &mut Self {
         self.encode = Some(Box::new(encode));
         self
     }
 
-    pub fn decode(&mut self, decode: Interceptor) -> &mut Self {
+    pub fn set_decoder(&mut self, decode: Interceptor) -> &mut Self {
         self.decode = Some(Box::new(decode));
         self
     }

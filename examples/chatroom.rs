@@ -109,7 +109,7 @@ async fn main() {
     stdout().flush().unwrap();
 
     let channel = RealtimeChannelBuilder::new("chatroom")
-        .broadcast(BroadcastConfig {
+        .set_broadcast_config(BroadcastConfig {
             broadcast_self: true,
             ack: false,
         })

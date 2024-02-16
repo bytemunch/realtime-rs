@@ -34,7 +34,7 @@ fn main() {
     println!("Login success!");
 
     let client = RealtimeClientBuilder::new(url, anon_key)
-        .access_token(session.access_token)
+        .set_access_token(session.access_token)
         .connect()
         .to_sync();
 
@@ -57,7 +57,7 @@ fn main() {
             },
             on_change,
         )
-        .presence(realtime_rs::message::payload::PresenceConfig {
+        .set_presence_config(realtime_rs::message::payload::PresenceConfig {
             key: Some("test_key".into()),
         })
         .build_sync(&client);

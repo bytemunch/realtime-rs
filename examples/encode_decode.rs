@@ -22,7 +22,7 @@ fn main() {
     }
 
     let client = RealtimeClientBuilder::new(url, anon_key)
-        .encode(|mut msg| {
+        .set_encoder(|mut msg| {
             println!("Encoder running...");
             match msg.payload {
                 Payload::Broadcast(ref mut payload) => {
@@ -40,7 +40,7 @@ fn main() {
 
             msg
         })
-        .decode(|mut msg| {
+        .set_decoder(|mut msg| {
             println!("Decoder running...");
             match msg.payload {
                 Payload::Broadcast(ref mut payload) => {
@@ -61,7 +61,7 @@ fn main() {
         .to_sync();
 
     let channel = RealtimeChannelBuilder::new("reverse_encoder")
-        .broadcast(BroadcastConfig {
+        .set_broadcast_config(BroadcastConfig {
             broadcast_self: true,
             ack: Default::default(),
         })

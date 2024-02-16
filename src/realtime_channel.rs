@@ -545,19 +545,19 @@ impl RealtimeChannelBuilder {
     }
 
     /// Set the topic of the channel
-    pub fn topic(&mut self, topic: impl Into<String>) -> &mut Self {
+    pub fn set_topic(&mut self, topic: impl Into<String>) -> &mut Self {
         self.topic = format!("realtime:{}", topic.into());
         self
     }
 
     /// Set the broadcast config for this channel
-    pub fn broadcast(&mut self, broadcast_config: BroadcastConfig) -> &mut Self {
+    pub fn set_broadcast_config(&mut self, broadcast_config: BroadcastConfig) -> &mut Self {
         self.broadcast = broadcast_config;
         self
     }
 
     /// Set the presence config for this channel
-    pub fn presence(&mut self, presence_config: PresenceConfig) -> &mut Self {
+    pub fn set_presence_config(&mut self, presence_config: PresenceConfig) -> &mut Self {
         self.presence = presence_config;
         self
     }
