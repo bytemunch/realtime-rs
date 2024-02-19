@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
+use log::debug;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -361,9 +362,7 @@ impl RealtimeClient {
 
         let headers = request.headers_mut();
 
-        let apikey: HeaderValue = format!("{}", self.anon_key)
-            .parse()
-            .expect("malformed access token?");
+        let apikey: HeaderValue = self.anon_key.parse().expect("malformed access token?");
         headers.insert("Authorization", apikey);
 
         let auth: HeaderValue = format!("Bearer {}", *token)
@@ -401,7 +400,7 @@ impl RealtimeClient {
 
         let mut state = self.state.lock().await;
         *state = ClientState::Closed;
-        println!("Disconnected!");
+        debug!("Disconnected!");
 
         let access_token = self.access_token.lock().await;
 
@@ -420,7 +419,7 @@ impl RealtimeClient {
     }
 
     async fn connect_ws(&mut self) -> Result<(), ConnectError> {
-        println!("Connecting...");
+        debug!("Connecting...");
 
         self.clear_tasks();
 
@@ -433,16 +432,16 @@ impl RealtimeClient {
             let conn = connect_async(request.clone()).await;
 
             if let Err(e) = conn {
-                println!("Connection failed: {}", e);
+                debug!("Connection failed: {}", e);
                 reconnect_attempts += 1;
                 if reconnect_attempts >= self.reconnect_max_attempts {
-                    println!(
+                    debug!(
                         "Max retries exceeded ({}/{})",
                         reconnect_attempts, self.reconnect_max_attempts
                     );
                     return Err(ConnectError::MaxRetries);
                 }
-                println!("Retrying (attempt #{})", reconnect_attempts);
+                debug!("Retrying (attempt #{})", reconnect_attempts);
                 sleep(self.reconnect_interval.0(reconnect_attempts)).await;
                 continue;
             }
@@ -451,7 +450,7 @@ impl RealtimeClient {
                 continue;
             };
 
-            println!("WebSocket handshake has been successfully completed");
+            debug!("WebSocket handshake has been successfully completed");
 
             let (write, mut read) = ws_stream.split();
 
@@ -465,7 +464,7 @@ impl RealtimeClient {
                         }
                         // TODO throttling. READING: drop or queue throttled messages? check what
                         // official clients do.
-                        println!("[SEND] {:?}", x);
+                        debug!("[SEND] {:?}", x.clone());
 
                         Ok(x.into())
                     })
@@ -483,7 +482,7 @@ impl RealtimeClient {
                 loop {
                     while let Some(msg) = read.next().await {
                         if let Err(_err) = msg {
-                            println!("Disconnected!");
+                            debug!("Disconnected!");
                             let mut state = recv_state.lock().await;
                             *state = ClientState::Reconnect;
                             continue;
@@ -495,7 +494,7 @@ impl RealtimeClient {
                             continue;
                         };
 
-                        println!("[RECV] {:?}", msg);
+                        debug!("[RECV] {:?}", msg.clone());
 
                         if let Some(decode) = decode.clone() {
                             msg = decode(msg);
@@ -524,7 +523,7 @@ impl RealtimeClient {
 
                     let mut state = recv_state.lock().await;
                     if *state == ClientState::Reconnect {
-                        println!("Reconnecting...");
+                        debug!("Reconnecting...");
                         *state = ClientState::Reconnecting;
                         drop(state);
                         manager.connect().await;

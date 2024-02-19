@@ -1,6 +1,5 @@
 use tokio::sync::oneshot;
 
-pub(crate) const DEBUG: bool = false;
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
 pub mod message;

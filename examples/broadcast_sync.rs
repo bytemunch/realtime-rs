@@ -6,6 +6,8 @@ use realtime_rs::{
 };
 
 fn main() {
+    env_logger::init();
+
     let endpoint = "http://127.0.0.1:54321";
     let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
 

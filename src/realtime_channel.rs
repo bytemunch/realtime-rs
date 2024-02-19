@@ -4,6 +4,7 @@ use crate::realtime_presence::PresenceCallbackMap;
 use crate::realtime_presence::RealtimePresence;
 use crate::Responder;
 
+use log::debug;
 use serde_json::Value;
 use tokio::{
     runtime::Runtime,
@@ -35,6 +36,7 @@ struct CdcCallback(
     Arc<dyn Fn(&PostgresChangesPayload) + Send + Sync>,
 );
 
+#[allow(clippy::type_complexity)]
 #[derive(Clone)]
 struct BroadcastCallback(Arc<dyn Fn(&HashMap<String, Value>) + Send + Sync>);
 
@@ -398,7 +400,7 @@ impl RealtimeChannel {
                         presence.sync(state.into());
                     }
                     _ => {
-                        println!("Unmatched payload ;_;")
+                        debug!("Unmatched payload ;_;");
                     }
                 }
 

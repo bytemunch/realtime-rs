@@ -14,6 +14,7 @@ categories = ["database"]
 
 [dependencies]
 futures-util = "0.3.30"
+log = "0.4.20"
 native-tls = "0.2.11"
 regex = "1.10.3"
 serde = { version = "1.0.193", features = ["serde_derive"] }
@@ -26,3 +27,4 @@ uuid = { version = "1.6.1", features = ["fast-rng", "v4"] }
 
 [dev-dependencies]
 go_true = {git = "https://github.com/bytemunch/gotrue-rs.git", branch = "provider-signin"}
+env_logger = "0.11.2"

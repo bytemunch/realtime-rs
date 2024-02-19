@@ -36,6 +36,7 @@ struct ChatMessage {
 // Chatroom using presence and broadcast
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let mut email = String::new();
     let mut password = String::new();
     let alias = Arc::new(Mutex::new(String::new()));

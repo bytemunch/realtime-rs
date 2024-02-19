@@ -7,6 +7,7 @@ use realtime_rs::{
 };
 
 fn main() {
+    env_logger::init();
     let url = "http://127.0.0.1:54321";
     let anon_key = env::var("LOCAL_ANON_KEY").expect("No anon key!");
 
