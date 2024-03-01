@@ -8,7 +8,7 @@ use realtime_rs::{
 fn main() {
     env_logger::init();
 
-    let endpoint = "http://127.0.0.1:54321";
+    let endpoint = "http://127.0.0.1:54321/realtime/v1";
     let access_token = std::env::var("LOCAL_ANON_KEY").unwrap();
 
     let client = RealtimeClientBuilder::new(endpoint, access_token)

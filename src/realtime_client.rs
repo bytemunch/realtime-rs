@@ -314,7 +314,7 @@ impl RealtimeClient {
     async fn build_request(&self) -> Result<Request<()>, ConnectError> {
         let token = self.access_token.lock().await;
         let uri: Uri = match format!(
-            "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
+            "{}/websocket?apikey={}&vsn=1.0.0",
             self.endpoint, self.anon_key
         )
         .parse()
