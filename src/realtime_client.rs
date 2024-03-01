@@ -72,7 +72,7 @@ pub(crate) enum ClientManagerMessage {
         res: Responder<ClientState>,
     },
     SetAccessToken {
-        res: Responder<String>,
+        res: Responder<()>,
         access_token: String,
     },
     AddChannel {
@@ -139,7 +139,7 @@ impl ClientManager {
     pub async fn set_access_token(
         &self,
         access_token: String,
-    ) -> Result<String, oneshot::error::RecvError> {
+    ) -> Result<(), oneshot::error::RecvError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.send(ClientManagerMessage::SetAccessToken {
             res: tx,
@@ -214,10 +214,7 @@ impl ClientManagerSync {
     /// Modify the client's access token
     /// This change cascades through all connected channels and sends the appropriate messages to
     /// the server
-    pub fn set_access_token(
-        &self,
-        access_token: String,
-    ) -> Result<String, oneshot::error::RecvError> {
+    pub fn set_access_token(&self, access_token: String) -> Result<(), oneshot::error::RecvError> {
         self.inner
             .rt
             .block_on(self.inner.set_access_token(access_token))
@@ -278,14 +275,15 @@ impl RealtimeClient {
                     let _ = res.send(token.clone());
                 }
                 ClientManagerMessage::SetAccessToken { access_token, res } => {
-                    let mut token = self.access_token.lock().await;
-                    *token = access_token;
-
+                    {
+                        let mut token = self.access_token.lock().await;
+                        *token = access_token;
+                    }
                     let channels = self.channels.lock().await;
                     for c in channels.iter() {
                         c.reauth().await.unwrap();
                     }
-                    let _ = res.send(token.clone());
+                    let _ = res.send(());
                 }
                 ClientManagerMessage::AddChannel { manager, res } => {
                     let added = self.add_channel(manager).await;

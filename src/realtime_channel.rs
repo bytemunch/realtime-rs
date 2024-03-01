@@ -489,9 +489,7 @@ impl RealtimeChannel {
     }
 
     async fn reauth(&mut self) -> Result<(), ChannelSendError> {
-        // TODO test this
         let access_token = self.access_token.lock().await;
-
         self.join_payload.access_token = access_token.clone();
 
         let state = self.state.lock().await;
