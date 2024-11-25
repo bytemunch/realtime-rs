@@ -105,15 +105,15 @@ pub struct PostgresChangesPayload {
 /// Recieved data regarding a postgres change
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PostgresChangeData {
-    pub columns: Vec<PostgresColumn>,
-    pub commit_timestamp: String,
-    pub errors: Option<String>,
-    pub old_record: Option<PostgresOldDataRef>,
-    pub record: Option<HashMap<String, Value>>,
-    #[serde(rename = "type")]
-    pub change_type: PostgresChangesEvent,
-    pub schema: String,
     pub table: String,
+    #[serde(rename = "type")]
+    pub change_type: String,
+    pub record: Option<HashMap<String, Value>>,
+    pub columns: Vec<PostgresColumn>,
+    pub errors: Option<String>,
+    pub schema: String,
+    pub commit_timestamp: String,
+    pub old_record: Option<HashMap<String, Value>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -182,6 +182,18 @@ pub enum PostgresChangesEvent {
     Update,
     #[serde(rename = "DELETE")]
     Delete,
+}
+
+impl PostgresChangesEvent {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "INSERT" => Some(PostgresChangesEvent::Insert),
+            "UPDATE" => Some(PostgresChangesEvent::Update),
+            "DELETE" => Some(PostgresChangesEvent::Delete),
+            "*" => Some(PostgresChangesEvent::All),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]

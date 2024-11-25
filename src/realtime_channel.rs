@@ -363,7 +363,7 @@ impl RealtimeChannel {
                         }
                     }
                     Payload::PostgresChanges(ref payload) => {
-                        if let Some(cb_vec) = cdc_callbacks.get_mut(&payload.data.change_type) {
+                        if let Some(cb_vec) = cdc_callbacks.get_mut(&PostgresChangesEvent::from_str(&payload.data.change_type).unwrap()) {
                             for cb in cb_vec {
                                 if !cb.0.check(&message) {
                                     continue;
